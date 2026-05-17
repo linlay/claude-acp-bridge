@@ -13,7 +13,9 @@ webclient -> agent-platform(PROXY) -> proxy-acp(HTTP/SSE + WS) -> ACP backend
 ### Prerequisites
 
 - Go 1.26 or newer
-- One or more ACP-compatible backend commands available on `PATH`
+- Node.js/npm available on `PATH` for the built-in Claude Code backend
+- Optional: one or more additional ACP-compatible backend commands available on `PATH`
+- Claude credentials in the service environment, such as `ANTHROPIC_API_KEY`
 
 ### Local Run
 
@@ -22,6 +24,14 @@ cp config.example.yml config.yml
 # Edit config.yml for local backend commands and working directories.
 make run
 ```
+
+If no config file is present, `proxy-acp` creates a built-in `claude-code` backend and starts:
+
+```bash
+npx -y @agentclientprotocol/claude-agent-acp@latest
+```
+
+The npm package is `@agentclientprotocol/claude-agent-acp`; its executable command is `claude-agent-acp`. The Go service starts it through `npx` and connects to its stdio JSON-RPC ACP stream with `github.com/coder/acp-go-sdk`.
 
 Point an `agent-platform` PROXY / ACP-PROXY agent at:
 
@@ -46,9 +56,15 @@ make test
 - `authToken` is optional. When set, clients must send `Authorization: Bearer <token>` or `?token=<token>`.
 - `backends[].key` selects an ACP backend. Request `params.backend` wins, then `agentKey`, then `defaultBackend`.
 - `backends[].command` and `backends[].args` define the ACP stdio command.
+- `claude-code` is built in. If `backends` is empty, or if a backend only sets `key: claude-code`, `command` and `args` default to `npx -y @agentclientprotocol/claude-agent-acp@latest`.
 - `backends[].defaultCwd` is the default ACP session working directory.
 - `backends[].env` adds environment variables to the backend process.
 - `backends[].idleTimeoutMs` controls idle session lifetime.
+- `backends[].capabilities.fs.readTextFile`, `backends[].capabilities.fs.writeTextFile`, and `backends[].capabilities.terminal` control what ACP client capabilities are advertised to the backend.
+
+Claude Code defaults to file read, file write, and terminal capabilities enabled. Other backends default to file read enabled, file write disabled, and terminal disabled.
+
+Backend processes inherit the `proxy-acp` process environment plus `backends[].env`, so values such as `ANTHROPIC_API_KEY`, `PATH`, `HOME`, and npm cache settings come from the Go service process. Commands are launched directly with `exec.Command`, not through a shell, so shell aliases and functions are not inherited.
 
 Configuration priority:
 
@@ -87,10 +103,12 @@ The service writes process logs to stdout/stderr. Capture those streams through 
 ### Common Checks
 
 - Confirm the configured listen address is reachable.
-- Confirm the selected ACP backend command exists on `PATH`.
+- Confirm the selected ACP backend command exists on `PATH`. For the built-in Claude backend, confirm `npx` is available.
 - Confirm `defaultCwd` exists and is accessible to the service process.
 - Confirm the client sends the configured bearer token when `authToken` is set.
 - Confirm long-running sessions are not being closed by `idleTimeoutMs`.
+
+When terminal or file-write capabilities are enabled, the selected ACP backend can execute local commands or write files from the service process. Enable those capabilities only for trusted backends and trusted working directories.
 
 ## Compatibility Surface
 
@@ -98,3 +116,4 @@ The service writes process logs to stdout/stderr. Capture those streams through 
 - `POST /api/submit` forwards platform HITL approval responses to ACP `session/request_permission`.
 - `POST /api/interrupt` sends ACP `session/cancel`.
 - `GET /ws` accepts platform PROXY frames for query, submit, and interrupt.
+# proxy-acp

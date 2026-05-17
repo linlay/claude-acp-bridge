@@ -13,6 +13,10 @@ import (
 const (
 	defaultListenAddr    = "127.0.0.1:3210"
 	defaultIdleTimeoutMs = int64(30 * time.Minute / time.Millisecond)
+
+	DefaultClaudeBackendKey = "claude-code"
+	DefaultClaudeCommand    = "npx"
+	DefaultClaudePackage    = "@agentclientprotocol/claude-agent-acp@latest"
 )
 
 type Config struct {
@@ -23,12 +27,23 @@ type Config struct {
 }
 
 type BackendConfig struct {
-	Key           string            `yaml:"key"`
-	Command       string            `yaml:"command"`
-	Args          []string          `yaml:"args"`
-	Env           map[string]string `yaml:"env"`
-	DefaultCwd    string            `yaml:"defaultCwd"`
-	IdleTimeoutMs int64             `yaml:"idleTimeoutMs"`
+	Key           string              `yaml:"key"`
+	Command       string              `yaml:"command"`
+	Args          []string            `yaml:"args"`
+	Env           map[string]string   `yaml:"env"`
+	DefaultCwd    string              `yaml:"defaultCwd"`
+	IdleTimeoutMs int64               `yaml:"idleTimeoutMs"`
+	Capabilities  BackendCapabilities `yaml:"capabilities"`
+}
+
+type BackendCapabilities struct {
+	Fs       FileSystemCapabilities `yaml:"fs"`
+	Terminal *bool                  `yaml:"terminal"`
+}
+
+type FileSystemCapabilities struct {
+	ReadTextFile  *bool `yaml:"readTextFile"`
+	WriteTextFile *bool `yaml:"writeTextFile"`
 }
 
 func Load(path string) (Config, error) {
@@ -65,6 +80,11 @@ func (c *Config) Normalize() error {
 	if c.ListenAddr == "" {
 		c.ListenAddr = defaultListenAddr
 	}
+	hadBackends := len(c.Backends) > 0
+	if !hadBackends {
+		c.Backends = []BackendConfig{DefaultClaudeBackend()}
+		c.DefaultBackend = DefaultClaudeBackendKey
+	}
 
 	seen := map[string]struct{}{}
 	for idx := range c.Backends {
@@ -74,6 +94,16 @@ func (c *Config) Normalize() error {
 		backend.DefaultCwd = strings.TrimSpace(backend.DefaultCwd)
 		if backend.Key == "" {
 			return fmt.Errorf("backends[%d].key is required", idx)
+		}
+		if backend.Key == DefaultClaudeBackendKey {
+			commandMissing := backend.Command == ""
+			argsMissing := len(backend.Args) == 0
+			if commandMissing {
+				backend.Command = DefaultClaudeCommand
+				if argsMissing {
+					backend.Args = DefaultClaudeArgs()
+				}
+			}
 		}
 		if backend.Command == "" {
 			return fmt.Errorf("backends[%d].command is required", idx)
@@ -100,14 +130,12 @@ func (c *Config) Normalize() error {
 		if backend.Env == nil {
 			backend.Env = map[string]string{}
 		}
+		backend.Capabilities.normalize(backend.Key == DefaultClaudeBackendKey)
 	}
 
 	c.DefaultBackend = strings.TrimSpace(c.DefaultBackend)
 	if c.DefaultBackend == "" && len(c.Backends) > 0 {
 		c.DefaultBackend = c.Backends[0].Key
-	}
-	if len(c.Backends) == 0 {
-		return fmt.Errorf("at least one backend is required")
 	}
 	if _, ok := seen[c.DefaultBackend]; !ok {
 		return fmt.Errorf("defaultBackend %q does not match any backend", c.DefaultBackend)
@@ -126,4 +154,44 @@ func (c Config) Backend(key string) (BackendConfig, bool) {
 		}
 	}
 	return BackendConfig{}, false
+}
+
+func DefaultClaudeBackend() BackendConfig {
+	return BackendConfig{
+		Key:     DefaultClaudeBackendKey,
+		Command: DefaultClaudeCommand,
+		Args:    DefaultClaudeArgs(),
+	}
+}
+
+func DefaultClaudeArgs() []string {
+	return []string{"-y", DefaultClaudePackage}
+}
+
+func (c *BackendCapabilities) normalize(isClaude bool) {
+	if c.Fs.ReadTextFile == nil {
+		c.Fs.ReadTextFile = boolPtr(true)
+	}
+	if c.Fs.WriteTextFile == nil {
+		c.Fs.WriteTextFile = boolPtr(isClaude)
+	}
+	if c.Terminal == nil {
+		c.Terminal = boolPtr(isClaude)
+	}
+}
+
+func (c BackendCapabilities) ReadTextFile() bool {
+	return c.Fs.ReadTextFile != nil && *c.Fs.ReadTextFile
+}
+
+func (c BackendCapabilities) WriteTextFile() bool {
+	return c.Fs.WriteTextFile != nil && *c.Fs.WriteTextFile
+}
+
+func (c BackendCapabilities) TerminalEnabled() bool {
+	return c.Terminal != nil && *c.Terminal
+}
+
+func boolPtr(v bool) *bool {
+	return &v
 }

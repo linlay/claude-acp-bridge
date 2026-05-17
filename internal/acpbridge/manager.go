@@ -3,7 +3,6 @@ package acpbridge
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"log/slog"
@@ -251,7 +250,7 @@ func startBackendSession(ctx context.Context, cfg config.BackendConfig, chatID s
 	}
 
 	sess := &backendSession{cfg: cfg, chatID: chatID, cwd: cwd, cmd: cmd}
-	client := &bridgeClient{session: sess}
+	client := &bridgeClient{session: sess, terminals: map[string]*terminalProcess{}}
 	conn := acp.NewClientSideConnection(client, stdin, stdout)
 	conn.SetLogger(slog.Default())
 	sess.client = client
@@ -273,8 +272,11 @@ func startBackendSession(ctx context.Context, cfg config.BackendConfig, chatID s
 		ProtocolVersion: acp.ProtocolVersionNumber,
 		ClientInfo:      &acp.Implementation{Name: "proxy-acp", Version: "0.1.0"},
 		ClientCapabilities: acp.ClientCapabilities{
-			Fs:       acp.FileSystemCapabilities{ReadTextFile: true, WriteTextFile: false},
-			Terminal: false,
+			Fs: acp.FileSystemCapabilities{
+				ReadTextFile:  cfg.Capabilities.ReadTextFile(),
+				WriteTextFile: cfg.Capabilities.WriteTextFile(),
+			},
+			Terminal: cfg.Capabilities.TerminalEnabled(),
 		},
 	}); err != nil {
 		sess.Close()
@@ -382,6 +384,9 @@ func (s *backendSession) Close() {
 	s.closed = true
 	cmd := s.cmd
 	s.mu.Unlock()
+	if s.client != nil {
+		s.client.closeTerminals()
+	}
 	if cmd != nil && cmd.Process != nil {
 		_ = cmd.Process.Kill()
 	}
@@ -395,6 +400,9 @@ func (s *backendSession) isClosed() bool {
 
 type bridgeClient struct {
 	session *backendSession
+
+	terminalMu sync.Mutex
+	terminals  map[string]*terminalProcess
 }
 
 func (c *bridgeClient) SessionUpdate(_ context.Context, params acp.SessionNotification) error {
@@ -414,6 +422,9 @@ func (c *bridgeClient) RequestPermission(ctx context.Context, params acp.Request
 }
 
 func (c *bridgeClient) ReadTextFile(_ context.Context, params acp.ReadTextFileRequest) (acp.ReadTextFileResponse, error) {
+	if !c.session.cfg.Capabilities.ReadTextFile() {
+		return acp.ReadTextFileResponse{}, fmt.Errorf("backend %q is not allowed to read files", c.session.cfg.Key)
+	}
 	if !filepath.IsAbs(params.Path) {
 		return acp.ReadTextFileResponse{}, fmt.Errorf("path must be absolute: %s", params.Path)
 	}
@@ -428,28 +439,106 @@ func (c *bridgeClient) ReadTextFile(_ context.Context, params acp.ReadTextFileRe
 	return acp.ReadTextFileResponse{Content: text}, nil
 }
 
-func (c *bridgeClient) WriteTextFile(context.Context, acp.WriteTextFileRequest) (acp.WriteTextFileResponse, error) {
-	return acp.WriteTextFileResponse{}, errors.New("proxy-acp does not allow ACP backends to write files directly")
+func (c *bridgeClient) WriteTextFile(_ context.Context, params acp.WriteTextFileRequest) (acp.WriteTextFileResponse, error) {
+	if !c.session.cfg.Capabilities.WriteTextFile() {
+		return acp.WriteTextFileResponse{}, fmt.Errorf("backend %q is not allowed to write files", c.session.cfg.Key)
+	}
+	if !filepath.IsAbs(params.Path) {
+		return acp.WriteTextFileResponse{}, fmt.Errorf("path must be absolute: %s", params.Path)
+	}
+	if err := os.WriteFile(params.Path, []byte(params.Content), 0o644); err != nil {
+		return acp.WriteTextFileResponse{}, err
+	}
+	return acp.WriteTextFileResponse{}, nil
 }
 
-func (c *bridgeClient) CreateTerminal(context.Context, acp.CreateTerminalRequest) (acp.CreateTerminalResponse, error) {
-	return acp.CreateTerminalResponse{}, errors.New("proxy-acp does not expose terminal execution in v1")
+func (c *bridgeClient) CreateTerminal(_ context.Context, params acp.CreateTerminalRequest) (acp.CreateTerminalResponse, error) {
+	if !c.session.cfg.Capabilities.TerminalEnabled() {
+		return acp.CreateTerminalResponse{}, fmt.Errorf("backend %q is not allowed to create terminals", c.session.cfg.Key)
+	}
+	term, err := startTerminalProcess(c.session, params)
+	if err != nil {
+		return acp.CreateTerminalResponse{}, err
+	}
+	c.terminalMu.Lock()
+	if c.terminals == nil {
+		c.terminals = map[string]*terminalProcess{}
+	}
+	c.terminals[term.id] = term
+	c.terminalMu.Unlock()
+	return acp.CreateTerminalResponse{TerminalId: term.id}, nil
 }
 
-func (c *bridgeClient) KillTerminal(context.Context, acp.KillTerminalRequest) (acp.KillTerminalResponse, error) {
-	return acp.KillTerminalResponse{}, errors.New("proxy-acp does not expose terminal execution in v1")
+func (c *bridgeClient) KillTerminal(_ context.Context, params acp.KillTerminalRequest) (acp.KillTerminalResponse, error) {
+	term, err := c.terminal(params.TerminalId)
+	if err != nil {
+		return acp.KillTerminalResponse{}, err
+	}
+	term.kill()
+	return acp.KillTerminalResponse{}, nil
 }
 
-func (c *bridgeClient) TerminalOutput(context.Context, acp.TerminalOutputRequest) (acp.TerminalOutputResponse, error) {
-	return acp.TerminalOutputResponse{}, errors.New("proxy-acp does not expose terminal execution in v1")
+func (c *bridgeClient) TerminalOutput(_ context.Context, params acp.TerminalOutputRequest) (acp.TerminalOutputResponse, error) {
+	term, err := c.terminal(params.TerminalId)
+	if err != nil {
+		return acp.TerminalOutputResponse{}, err
+	}
+	return term.output(), nil
 }
 
-func (c *bridgeClient) ReleaseTerminal(context.Context, acp.ReleaseTerminalRequest) (acp.ReleaseTerminalResponse, error) {
-	return acp.ReleaseTerminalResponse{}, errors.New("proxy-acp does not expose terminal execution in v1")
+func (c *bridgeClient) ReleaseTerminal(_ context.Context, params acp.ReleaseTerminalRequest) (acp.ReleaseTerminalResponse, error) {
+	term, err := c.removeTerminal(params.TerminalId)
+	if err != nil {
+		return acp.ReleaseTerminalResponse{}, err
+	}
+	term.kill()
+	return acp.ReleaseTerminalResponse{}, nil
 }
 
-func (c *bridgeClient) WaitForTerminalExit(context.Context, acp.WaitForTerminalExitRequest) (acp.WaitForTerminalExitResponse, error) {
-	return acp.WaitForTerminalExitResponse{}, errors.New("proxy-acp does not expose terminal execution in v1")
+func (c *bridgeClient) WaitForTerminalExit(ctx context.Context, params acp.WaitForTerminalExitRequest) (acp.WaitForTerminalExitResponse, error) {
+	term, err := c.terminal(params.TerminalId)
+	if err != nil {
+		return acp.WaitForTerminalExitResponse{}, err
+	}
+	status, err := term.wait(ctx)
+	if err != nil {
+		return acp.WaitForTerminalExitResponse{}, err
+	}
+	return acp.WaitForTerminalExitResponse{ExitCode: status.ExitCode, Signal: status.Signal}, nil
+}
+
+func (c *bridgeClient) terminal(id string) (*terminalProcess, error) {
+	c.terminalMu.Lock()
+	defer c.terminalMu.Unlock()
+	term := c.terminals[id]
+	if term == nil {
+		return nil, fmt.Errorf("terminal %q not found", id)
+	}
+	return term, nil
+}
+
+func (c *bridgeClient) removeTerminal(id string) (*terminalProcess, error) {
+	c.terminalMu.Lock()
+	defer c.terminalMu.Unlock()
+	term := c.terminals[id]
+	if term == nil {
+		return nil, fmt.Errorf("terminal %q not found", id)
+	}
+	delete(c.terminals, id)
+	return term, nil
+}
+
+func (c *bridgeClient) closeTerminals() {
+	c.terminalMu.Lock()
+	terms := make([]*terminalProcess, 0, len(c.terminals))
+	for _, term := range c.terminals {
+		terms = append(terms, term)
+	}
+	c.terminals = map[string]*terminalProcess{}
+	c.terminalMu.Unlock()
+	for _, term := range terms {
+		term.kill()
+	}
 }
 
 func promptBlocks(req platform.QueryRequest) ([]acp.ContentBlock, error) {

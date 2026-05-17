@@ -2,10 +2,15 @@ package acpbridge
 
 import (
 	"context"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
+
+	"github.com/coder/acp-go-sdk"
 
 	"proxy-acp/internal/config"
 	"proxy-acp/internal/platform"
@@ -119,6 +124,103 @@ func TestManagerSubmitResolvesACPPermission(t *testing.T) {
 	}
 }
 
+func TestBridgeClientWriteTextFile(t *testing.T) {
+	client := testBridgeClient(t)
+	path := filepath.Join(t.TempDir(), "note.txt")
+	if _, err := client.WriteTextFile(context.Background(), acp.WriteTextFileRequest{
+		Path:    path,
+		Content: "hello claude",
+	}); err != nil {
+		t.Fatalf("write text file: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read written file: %v", err)
+	}
+	if string(data) != "hello claude" {
+		t.Fatalf("content = %q", data)
+	}
+}
+
+func TestBridgeClientTerminalLifecycle(t *testing.T) {
+	client := testBridgeClient(t)
+	resp, err := client.CreateTerminal(context.Background(), acp.CreateTerminalRequest{
+		Command: "sh",
+		Args:    []string{"-c", "printf hello"},
+	})
+	if err != nil {
+		t.Fatalf("create terminal: %v", err)
+	}
+	status, err := client.WaitForTerminalExit(context.Background(), acp.WaitForTerminalExitRequest{TerminalId: resp.TerminalId})
+	if err != nil {
+		t.Fatalf("wait terminal: %v", err)
+	}
+	if status.ExitCode == nil || *status.ExitCode != 0 {
+		t.Fatalf("exit status = %#v", status)
+	}
+	output, err := client.TerminalOutput(context.Background(), acp.TerminalOutputRequest{TerminalId: resp.TerminalId})
+	if err != nil {
+		t.Fatalf("terminal output: %v", err)
+	}
+	if output.Output != "hello" || output.Truncated {
+		t.Fatalf("output = %#v", output)
+	}
+	if _, err := client.ReleaseTerminal(context.Background(), acp.ReleaseTerminalRequest{TerminalId: resp.TerminalId}); err != nil {
+		t.Fatalf("release terminal: %v", err)
+	}
+}
+
+func TestBridgeClientKillTerminal(t *testing.T) {
+	client := testBridgeClient(t)
+	resp, err := client.CreateTerminal(context.Background(), acp.CreateTerminalRequest{
+		Command: "sh",
+		Args:    []string{"-c", "sleep 5"},
+	})
+	if err != nil {
+		t.Fatalf("create terminal: %v", err)
+	}
+	if _, err := client.KillTerminal(context.Background(), acp.KillTerminalRequest{TerminalId: resp.TerminalId}); err != nil {
+		t.Fatalf("kill terminal: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	status, err := client.WaitForTerminalExit(ctx, acp.WaitForTerminalExitRequest{TerminalId: resp.TerminalId})
+	if err != nil {
+		t.Fatalf("wait killed terminal: %v", err)
+	}
+	if status.ExitCode == nil && status.Signal == nil {
+		t.Fatalf("expected killed status, got %#v", status)
+	}
+}
+
+func TestBridgeClientTerminalOutputLimitPreservesUTF8(t *testing.T) {
+	client := testBridgeClient(t)
+	resp, err := client.CreateTerminal(context.Background(), acp.CreateTerminalRequest{
+		Command:         "sh",
+		Args:            []string{"-c", "printf '你好世界'"},
+		OutputByteLimit: intPtr(7),
+	})
+	if err != nil {
+		t.Fatalf("create terminal: %v", err)
+	}
+	if _, err := client.WaitForTerminalExit(context.Background(), acp.WaitForTerminalExitRequest{TerminalId: resp.TerminalId}); err != nil {
+		t.Fatalf("wait terminal: %v", err)
+	}
+	output, err := client.TerminalOutput(context.Background(), acp.TerminalOutputRequest{TerminalId: resp.TerminalId})
+	if err != nil {
+		t.Fatalf("terminal output: %v", err)
+	}
+	if !output.Truncated {
+		t.Fatalf("expected truncated output")
+	}
+	if !utf8.ValidString(output.Output) {
+		t.Fatalf("output is not valid utf8: %q", output.Output)
+	}
+	if strings.Contains(output.Output, string(utf8.RuneError)) {
+		t.Fatalf("output contains replacement rune: %q", output.Output)
+	}
+}
+
 func testConfig(t *testing.T) config.Config {
 	t.Helper()
 	root, err := filepath.Abs("../..")
@@ -139,6 +241,29 @@ func testConfig(t *testing.T) config.Config {
 		t.Fatalf("normalize config: %v", err)
 	}
 	return cfg
+}
+
+func testBridgeClient(t *testing.T) *bridgeClient {
+	t.Helper()
+	dir := t.TempDir()
+	cfg := config.BackendConfig{
+		Key:        config.DefaultClaudeBackendKey,
+		Command:    config.DefaultClaudeCommand,
+		Args:       config.DefaultClaudeArgs(),
+		DefaultCwd: dir,
+	}
+	writes := true
+	terminal := true
+	reads := true
+	cfg.Capabilities.Fs.ReadTextFile = &reads
+	cfg.Capabilities.Fs.WriteTextFile = &writes
+	cfg.Capabilities.Terminal = &terminal
+	sess := &backendSession{cfg: cfg, cwd: dir}
+	return &bridgeClient{session: sess, terminals: map[string]*terminalProcess{}}
+}
+
+func intPtr(v int) *int {
+	return &v
 }
 
 func eventTypes(events []platform.EventData) []string {

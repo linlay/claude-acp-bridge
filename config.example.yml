@@ -1,18 +1,32 @@
 listenAddr: 127.0.0.1:3210
 authToken: ""
-defaultBackend: codex
+defaultBackend: claude-code
 
 backends:
+  # claude-code is also built in: if no backends are configured, proxy-acp starts
+  # `npx -y @agentclientprotocol/claude-agent-acp@latest` by default.
+  - key: claude-code
+    command: npx
+    args:
+      - -y
+      - "@agentclientprotocol/claude-agent-acp@latest"
+    defaultCwd: /Users/linlay/Project/zenmind
+    idleTimeoutMs: 1800000
+    env: {}
+    capabilities:
+      fs:
+        readTextFile: true
+        writeTextFile: true
+      terminal: true
+
   - key: codex
     command: codex-acp
     args: []
     defaultCwd: /Users/linlay/Project/zenmind
     idleTimeoutMs: 1800000
     env: {}
-
-  - key: claude-code
-    command: claude-code-acp
-    args: []
-    defaultCwd: /Users/linlay/Project/zenmind
-    idleTimeoutMs: 1800000
-    env: {}
+    capabilities:
+      fs:
+        readTextFile: true
+        writeTextFile: false
+      terminal: false
