@@ -1,0 +1,18 @@
+listenAddr: 127.0.0.1:3210
+authToken: ""
+defaultBackend: codex
+
+backends:
+  - key: codex
+    command: codex-acp
+    args: []
+    defaultCwd: /Users/linlay/Project/zenmind
+    idleTimeoutMs: 1800000
+    env: {}
+
+  - key: claude-code
+    command: claude-code-acp
+    args: []
+    defaultCwd: /Users/linlay/Project/zenmind
+    idleTimeoutMs: 1800000
+    env: {}
