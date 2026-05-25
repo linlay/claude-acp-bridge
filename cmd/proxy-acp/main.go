@@ -17,10 +17,10 @@ import (
 )
 
 func main() {
-	configPath := flag.String("config", "", "Path to proxy-acp YAML config")
+	envPath := flag.String("env", "", "Path to proxy-acp dotenv config")
 	flag.Parse()
 
-	cfg, err := config.Load(*configPath)
+	cfg, err := config.Load(*envPath)
 	if err != nil {
 		log.Fatalf("load config: %v", err)
 	}

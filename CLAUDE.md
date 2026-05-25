@@ -2,7 +2,7 @@
 
 ## 1. Project Overview
 
-`proxy-acp` is a Go backend service that adapts Zenmind `agent-platform` PROXY traffic to ACP-compatible CLI backends. Its boundary is protocol translation and session management; it does not implement model inference, persistence, billing, or user management.
+`proxy-acp` is a Go backend service that adapts Zenmind `agent-platform` PROXY traffic to Claude Code CLI through ACP. Its boundary is protocol translation and session management; it does not implement model inference, persistence, billing, or user management.
 
 Core capabilities:
 
@@ -12,13 +12,15 @@ Core capabilities:
 - Start and reuse ACP stdio backend sessions by backend, chat, and working directory.
 - Forward HITL permission responses and cancellation requests to ACP sessions.
 
+Codex CLI is not supported by this repository.
+
 ## 2. Tech Stack
 
 - Language: Go 1.26
 - HTTP server: Go standard library `net/http`
 - WebSocket: `github.com/gorilla/websocket`
 - ACP client SDK: `github.com/coder/acp-go-sdk`
-- Config format: YAML via `gopkg.in/yaml.v3`
+- Config format: dotenv loaded by `internal/config`
 - Build tool: `go build` through `Makefile`
 - Deployment style: process/binary deployment; container packaging is not defined in this repository.
 
@@ -26,16 +28,16 @@ Core capabilities:
 
 The service is split into three main layers:
 
-- `cmd/proxy-acp`: process entrypoint, flag parsing, config loading, HTTP server lifecycle, graceful shutdown.
+- `cmd/proxy-acp`: process entrypoint, flag parsing, env config loading, HTTP server lifecycle, graceful shutdown.
 - `internal/server`: HTTP and WebSocket handlers, auth checks, request validation, platform response shaping.
 - `internal/acpbridge`: backend selection, ACP process lifecycle, session reuse, turn execution, permission forwarding, cancellation.
 - `internal/platform`: platform DTOs and HTTP/SSE serialization helpers.
-- `internal/config`: YAML loading, defaults, normalization, and backend lookup.
+- `internal/config`: dotenv loading, defaults, normalization, and backend lookup.
 
 Request flow:
 
 ```text
-platform client -> internal/server -> internal/acpbridge -> ACP backend process
+platform client -> internal/server -> internal/acpbridge -> claude-cli-acp -> Claude Code CLI
 ```
 
 Backend sessions are keyed by backend key, chat id, and working directory. Active runs are tracked separately so interrupt requests can find the session currently handling a run.
@@ -45,11 +47,11 @@ Backend sessions are keyed by backend key, chat id, and working directory. Activ
 ```text
 cmd/proxy-acp/          Service entrypoint.
 internal/acpbridge/     ACP backend session and turn management.
-internal/config/        YAML config loading and normalization.
+internal/config/        Dotenv config loading and normalization.
 internal/platform/      Platform request/response/event types.
 internal/server/        HTTP, SSE, WebSocket routes and auth.
 internal/testagent/     Local test helper entrypoint.
-config.example.yml      Example YAML configuration.
+.env.example            Example dotenv configuration.
 README.md               User-facing usage, deployment, and operations guide.
 Makefile                Build, run, test, format, and cleanup commands.
 ```
@@ -59,8 +61,8 @@ Makefile                Build, run, test, format, and cleanup commands.
 Core configuration types live in `internal/config`:
 
 - `Config`: listen address, optional auth token, default backend, backend list.
-- `BackendConfig`: backend key, command, args, environment, default cwd, idle timeout.
-- `BackendCapabilities`: ACP client file-system and terminal capabilities advertised to each backend.
+- `BackendConfig`: backend key, command, args, environment, and idle timeout.
+- `BackendCapabilities`: ACP client file-system and terminal capabilities advertised to Claude Code.
 
 Platform DTOs live in `internal/platform`:
 
@@ -71,20 +73,20 @@ Platform DTOs live in `internal/platform`:
 
 ACP session state lives in `internal/acpbridge`:
 
-- `Manager`: configured backends, session registry, awaiting permission registry, active run registry.
+- `Manager`: configured backend, session registry, awaiting permission registry, active run registry.
 - `backendSession`: running ACP process, ACP connection, active turn state, and lifecycle hooks.
 
 ## 6. API Definition
 
 Authentication:
 
-- If `authToken` is empty, API routes are unauthenticated.
-- If `authToken` is set, clients must pass `Authorization: Bearer <token>` or `?token=<token>`.
+- If `PROXY_ACP_AUTH_TOKEN` is empty, API routes are unauthenticated.
+- If `PROXY_ACP_AUTH_TOKEN` is set, clients must pass `Authorization: Bearer <token>` or `?token=<token>`.
 
 Endpoints:
 
 - `GET /healthz`: returns a JSON success response with `{ "ok": true }`.
-- `POST /api/query`: accepts `platform.QueryRequest`, streams platform SSE events, and ends with `[DONE]`.
+- `POST /api/query`: accepts `platform.QueryRequest`, requires `params.cwd`, streams platform SSE events, and ends with `[DONE]`.
 - `POST /api/submit`: accepts `platform.SubmitRequest`, forwards permission responses, and returns `SubmitResponse`.
 - `POST /api/interrupt`: accepts `platform.InterruptRequest`, cancels an active ACP session run, and returns `InterruptResponse`.
 - `GET /ws`: upgrades to WebSocket and accepts `request.query`, `request.submit`, and `request.interrupt` frames.
@@ -96,8 +98,9 @@ Error responses use the platform JSON envelope with non-zero `code`, a `msg`, an
 - Keep protocol-specific DTOs in `internal/platform`.
 - Keep ACP process and session behavior in `internal/acpbridge`.
 - Keep HTTP routing, method checks, auth, and response writing in `internal/server`.
-- Config defaults belong in code. Example values belong in `config.example.yml`. Local values belong in ignored `config.yml` or `config.yaml`.
-- Tests should cover protocol serialization, config normalization, server handlers, and ACP bridge session behavior.
+- Config defaults belong in code. Example values belong in `.env.example`. Local values belong in ignored `.env` files.
+- The platform owns the session working directory and must send `params.cwd`; do not add a service-side default cwd.
+- Tests should cover protocol serialization, config loading, server handlers, and ACP bridge session behavior.
 - Avoid committing real tokens, production paths, or host-specific backend credentials.
 
 ## 8. Development Flow
@@ -105,13 +108,13 @@ Error responses use the platform JSON envelope with non-zero `code`, a `msg`, an
 Typical local flow:
 
 ```bash
-cp config.example.yml config.yml
+cp .env.example .env
 make fmt
 make test
 make run
 ```
 
-Build a binary:
+Build binaries:
 
 ```bash
 make build
@@ -126,9 +129,9 @@ make clean
 ## 9. Known Constraints And Notes
 
 - The repository does not currently define Docker or Kubernetes deployment assets.
-- ACP backend commands must be installed separately and available to the service process.
-- The `claude-code` backend should be configured explicitly, usually through the repository's `claude-cli-acp` wrapper and the host Claude Code CLI.
-- Backend processes inherit the service environment plus `backends[].env`.
-- Claude Code defaults to file read, file write, and terminal capabilities enabled. Other backends default to file read only.
-- `config.example.yml` contains illustrative local values only and should be edited before local use.
+- Claude Code CLI must be installed separately and available to the service process.
+- `CLAUDE_CODE_CLI` configures the host Claude Code CLI command or absolute path.
+- `PROXY_ACP_ADDR` defaults to local-only `127.0.0.1`; remote access requires an explicit value such as `0.0.0.0`.
+- Backend processes inherit the service environment.
+- Claude Code defaults to file read, file write, and terminal capabilities enabled.
 - WebSocket origin checks currently allow all origins.

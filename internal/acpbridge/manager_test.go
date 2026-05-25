@@ -45,6 +45,7 @@ func TestManagerExecuteMapsACPUpdatesToPlatformEvents(t *testing.T) {
 		ChatID:    "chat_1",
 		AgentKey:  "fake",
 		Message:   "world",
+		Params:    testParams(t),
 	}, sink)
 	if err != nil {
 		t.Fatalf("execute: %v", err)
@@ -76,6 +77,22 @@ func TestManagerExecuteMapsACPUpdatesToPlatformEvents(t *testing.T) {
 	}
 }
 
+func TestManagerExecuteRequiresCWDParam(t *testing.T) {
+	m := NewManager(testConfig(t))
+	defer m.Close()
+
+	err := m.Execute(context.Background(), platform.QueryRequest{
+		RequestID: "req_missing_cwd",
+		RunID:     "run_missing_cwd",
+		ChatID:    "chat_missing_cwd",
+		AgentKey:  "fake",
+		Message:   "world",
+	}, &recordingSink{})
+	if err == nil || !strings.Contains(err.Error(), "params.cwd is required") {
+		t.Fatalf("error = %v, want missing cwd error", err)
+	}
+}
+
 func TestManagerSubmitResolvesACPPermission(t *testing.T) {
 	m := NewManager(testConfig(t))
 	defer m.Close()
@@ -89,6 +106,7 @@ func TestManagerSubmitResolvesACPPermission(t *testing.T) {
 			ChatID:    "chat_2",
 			AgentKey:  "fake",
 			Message:   "needs permission",
+			Params:    testParams(t),
 		}, sink)
 	}()
 
@@ -137,6 +155,7 @@ func TestManagerSubmitResolvesQuestionAwaiting(t *testing.T) {
 			ChatID:    "chat_3",
 			AgentKey:  "fake",
 			Message:   "needs question",
+			Params:    testParams(t),
 		}, sink)
 	}()
 
@@ -213,6 +232,7 @@ func TestManagerSubmitDismissesQuestionAwaiting(t *testing.T) {
 			ChatID:    "chat_4",
 			AgentKey:  "fake",
 			Message:   "needs question",
+			Params:    testParams(t),
 		}, sink)
 	}()
 
@@ -354,18 +374,13 @@ func TestBridgeClientTerminalOutputLimitPreservesUTF8(t *testing.T) {
 
 func testConfig(t *testing.T) config.Config {
 	t.Helper()
-	root, err := filepath.Abs("../..")
-	if err != nil {
-		t.Fatalf("repo root: %v", err)
-	}
 	cfg := config.Config{
 		ListenAddr:     "127.0.0.1:0",
 		DefaultBackend: "fake",
 		Backends: []config.BackendConfig{{
-			Key:        "fake",
-			Command:    "go",
-			Args:       []string{"run", "./internal/testagent"},
-			DefaultCwd: root,
+			Key:     "fake",
+			Command: "go",
+			Args:    []string{"run", "./internal/testagent"},
 		}},
 	}
 	if err := cfg.Normalize(); err != nil {
@@ -378,10 +393,9 @@ func testBridgeClient(t *testing.T) *bridgeClient {
 	t.Helper()
 	dir := t.TempDir()
 	cfg := config.BackendConfig{
-		Key:        config.DefaultClaudeBackendKey,
-		Command:    "claude-cli-acp",
-		Args:       []string{"-claude", "claude"},
-		DefaultCwd: dir,
+		Key:     config.DefaultClaudeBackendKey,
+		Command: "claude-cli-acp",
+		Args:    []string{"-claude", "claude"},
 	}
 	writes := true
 	terminal := true
@@ -391,6 +405,15 @@ func testBridgeClient(t *testing.T) *bridgeClient {
 	cfg.Capabilities.Terminal = &terminal
 	sess := &backendSession{cfg: cfg, cwd: dir}
 	return &bridgeClient{session: sess, terminals: map[string]*terminalProcess{}}
+}
+
+func testParams(t *testing.T) map[string]any {
+	t.Helper()
+	root, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatalf("repo root: %v", err)
+	}
+	return map[string]any{"cwd": root}
 }
 
 func intPtr(v int) *int {

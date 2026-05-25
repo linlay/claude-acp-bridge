@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -25,7 +26,9 @@ func TestQuerySSEAndSubmit(t *testing.T) {
 	server := httptest.NewServer(handler)
 	defer server.Close()
 
-	resp, err := http.Post(server.URL+"/api/query", "application/json", bytes.NewBufferString(`{"requestId":"req_http","runId":"run_http","chatId":"chat_http","agentKey":"fake","message":"needs permission"}`))
+	root := repoRoot(t)
+	body := fmt.Sprintf(`{"requestId":"req_http","runId":"run_http","chatId":"chat_http","agentKey":"fake","message":"needs permission","params":{"cwd":%q}}`, root)
+	resp, err := http.Post(server.URL+"/api/query", "application/json", bytes.NewBufferString(body))
 	if err != nil {
 		t.Fatalf("post query: %v", err)
 	}
@@ -111,24 +114,28 @@ func decodeEventLine(t *testing.T, line string) platform.EventData {
 
 func testConfig(t *testing.T) config.Config {
 	t.Helper()
-	root, err := filepath.Abs("../..")
-	if err != nil {
-		t.Fatalf("repo root: %v", err)
-	}
 	cfg := config.Config{
 		ListenAddr:     "127.0.0.1:0",
 		DefaultBackend: "fake",
 		Backends: []config.BackendConfig{{
-			Key:        "fake",
-			Command:    "go",
-			Args:       []string{"run", "./internal/testagent"},
-			DefaultCwd: root,
+			Key:     "fake",
+			Command: "go",
+			Args:    []string{"run", "./internal/testagent"},
 		}},
 	}
 	if err := cfg.Normalize(); err != nil {
 		t.Fatalf("normalize config: %v", err)
 	}
 	return cfg
+}
+
+func repoRoot(t *testing.T) string {
+	t.Helper()
+	root, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatalf("repo root: %v", err)
+	}
+	return root
 }
 
 func contains(items []string, want string) bool {

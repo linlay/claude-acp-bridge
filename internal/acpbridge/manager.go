@@ -174,7 +174,7 @@ func (m *Manager) resolveBackend(req platform.QueryRequest) (config.BackendConfi
 	}
 	cwd := stringParam(req.Params, "cwd")
 	if cwd == "" {
-		cwd = backend.DefaultCwd
+		return config.BackendConfig{}, "", fmt.Errorf("params.cwd is required; agent-platform must provide the ACP session working directory")
 	}
 	abs, err := filepath.Abs(cwd)
 	if err != nil {

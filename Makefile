@@ -1,6 +1,6 @@
 APP_NAME := proxy-acp
 CLAUDE_CLI_ACP_NAME := claude-cli-acp
-CONFIG ?= config.yml
+ENV ?= .env
 
 .PHONY: build run test fmt clean
 
@@ -9,7 +9,7 @@ build:
 	go build -o $(CLAUDE_CLI_ACP_NAME) ./cmd/claude-cli-acp
 
 run:
-	go run ./cmd/proxy-acp -config $(CONFIG)
+	go run ./cmd/proxy-acp -env $(ENV)
 
 test:
 	go test ./...
