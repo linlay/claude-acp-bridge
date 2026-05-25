@@ -121,6 +121,21 @@ func (m *Manager) Submit(req platform.SubmitRequest) (platform.SubmitResponse, b
 	}
 }
 
+func (m *Manager) Steer(req platform.SteerRequest) platform.SteerResponse {
+	req.SteerID = normalizeSteerID(req.SteerID)
+	m.mu.Lock()
+	sess := m.runs[req.RunID]
+	m.mu.Unlock()
+	if sess == nil {
+		return platform.SteerResponse{Accepted: false, Status: "unmatched", RunID: req.RunID, SteerID: req.SteerID, Detail: "No active ACP run matched steer"}
+	}
+	t := sess.activeTurn()
+	if t == nil {
+		return platform.SteerResponse{Accepted: false, Status: "unmatched", RunID: req.RunID, SteerID: req.SteerID, Detail: "ACP run is not accepting steer"}
+	}
+	return t.enqueueSteer(req)
+}
+
 func (m *Manager) Interrupt(req platform.InterruptRequest) platform.InterruptResponse {
 	m.mu.Lock()
 	sess := m.runs[req.RunID]
@@ -158,6 +173,13 @@ func (m *Manager) unregisterRun(runID string) {
 	m.mu.Lock()
 	delete(m.runs, runID)
 	m.mu.Unlock()
+}
+
+func normalizeSteerID(steerID string) string {
+	if strings.TrimSpace(steerID) != "" {
+		return strings.TrimSpace(steerID)
+	}
+	return time.Now().UTC().Format("20060102150405.000000000")
 }
 
 func (m *Manager) resolveBackend(req platform.QueryRequest) (config.BackendConfig, string, error) {
@@ -355,10 +377,32 @@ func (s *backendSession) prompt(ctx context.Context, req platform.QueryRequest, 
 	}
 
 	resp, err := s.conn.Prompt(ctx, acp.PromptRequest{SessionId: s.sessionID, Prompt: prompt})
-	t.closeOpenStreams()
-	if err != nil {
-		t.emitRunError(err)
-		return err
+	for {
+		t.closeOpenStreams()
+		if err != nil {
+			t.emitRunError(err)
+			return err
+		}
+		if resp.StopReason == acp.StopReasonCancelled {
+			break
+		}
+		steer, ok := t.nextSteer()
+		if !ok {
+			break
+		}
+		steerReq := req
+		steerReq.RequestID = steer.RequestID
+		steerReq.ChatID = firstNonBlank(steer.ChatID, req.ChatID)
+		steerReq.AgentKey = firstNonBlank(steer.AgentKey, req.AgentKey)
+		steerReq.TeamID = firstNonBlank(steer.TeamID, req.TeamID)
+		steerReq.Message = steer.Message
+		steerReq.References = nil
+		prompt, err = promptBlocks(steerReq)
+		if err != nil {
+			t.emitRunError(err)
+			return err
+		}
+		resp, err = s.conn.Prompt(ctx, acp.PromptRequest{SessionId: s.sessionID, Prompt: prompt})
 	}
 
 	switch resp.StopReason {
@@ -373,9 +417,13 @@ func (s *backendSession) prompt(ctx context.Context, req platform.QueryRequest, 
 func (s *backendSession) cancel(ctx context.Context) error {
 	s.mu.Lock()
 	sessionID := s.sessionID
+	active := s.active
 	s.mu.Unlock()
 	if sessionID == "" {
 		return fmt.Errorf("ACP session is not initialized")
+	}
+	if active != nil {
+		active.interrupt()
 	}
 	return s.conn.Cancel(ctx, acp.CancelNotification{SessionId: sessionID})
 }

@@ -90,8 +90,9 @@ Endpoints:
 - `GET /healthz`: returns a JSON success response with `{ "ok": true }`.
 - `POST /api/query`: accepts `platform.QueryRequest`, requires `params.cwd`, streams platform SSE events, and ends with `[DONE]`.
 - `POST /api/submit`: accepts `platform.SubmitRequest`, forwards permission responses, and returns `SubmitResponse`.
+- `POST /api/steer`: accepts `platform.SteerRequest`, queues a follow-up prompt on the active run, and returns `SteerResponse`.
 - `POST /api/interrupt`: accepts `platform.InterruptRequest`, cancels an active ACP session run, and returns `InterruptResponse`.
-- `GET /ws`: upgrades to WebSocket and accepts `request.query`, `request.submit`, and `request.interrupt` frames.
+- `GET /ws`: upgrades to WebSocket and accepts `request.query`, `request.submit`, `request.steer`, and `request.interrupt` frames.
 
 Error responses use the platform JSON envelope with non-zero `code`, a `msg`, and an empty data object.
 

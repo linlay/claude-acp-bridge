@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/coder/acp-go-sdk"
 
@@ -20,14 +21,17 @@ type turn struct {
 
 	seq atomic.Int64
 
-	mu            sync.Mutex
-	contentOpen   bool
-	contentID     string
-	reasoningOpen bool
-	reasoningID   string
-	planSeen      bool
-	toolStarted   map[string]bool
-	toolEnded     map[string]bool
+	mu             sync.Mutex
+	contentOpen    bool
+	contentID      string
+	reasoningOpen  bool
+	reasoningID    string
+	planSeen       bool
+	toolStarted    map[string]bool
+	toolEnded      map[string]bool
+	steers         []platform.SteerRequest
+	acceptingSteer bool
+	interrupted    bool
 }
 
 type pendingPermission struct {
@@ -42,13 +46,14 @@ type pendingPermission struct {
 
 func newTurn(req platform.QueryRequest, sink EventSink, mgr *Manager) *turn {
 	return &turn{
-		req:         req,
-		sink:        sink,
-		mgr:         mgr,
-		contentID:   stableID(req.RunID, "content"),
-		reasoningID: stableID(req.RunID, "reasoning"),
-		toolStarted: map[string]bool{},
-		toolEnded:   map[string]bool{},
+		req:            req,
+		sink:           sink,
+		mgr:            mgr,
+		contentID:      stableID(req.RunID, "content"),
+		reasoningID:    stableID(req.RunID, "reasoning"),
+		toolStarted:    map[string]bool{},
+		toolEnded:      map[string]bool{},
+		acceptingSteer: true,
 	}
 }
 
@@ -75,6 +80,64 @@ func (t *turn) emitRunError(err error) {
 			"message": err.Error(),
 		},
 	})
+}
+
+func (t *turn) enqueueSteer(req platform.SteerRequest) platform.SteerResponse {
+	if strings.TrimSpace(req.SteerID) == "" {
+		req.SteerID = time.Now().UTC().Format("20060102150405.000000000")
+	}
+	t.mu.Lock()
+	if t.interrupted || !t.acceptingSteer {
+		t.mu.Unlock()
+		return platform.SteerResponse{
+			Accepted: false,
+			Status:   "unmatched",
+			RunID:    req.RunID,
+			SteerID:  req.SteerID,
+			Detail:   "ACP run is not accepting steer",
+		}
+	}
+	t.steers = append(t.steers, req)
+	t.mu.Unlock()
+	t.emit("request.steer", map[string]any{
+		"requestId": req.RequestID,
+		"chatId":    firstNonBlank(req.ChatID, t.req.ChatID),
+		"runId":     t.req.RunID,
+		"steerId":   req.SteerID,
+		"message":   req.Message,
+	})
+	return platform.SteerResponse{
+		Accepted: true,
+		Status:   "accepted",
+		RunID:    req.RunID,
+		SteerID:  req.SteerID,
+		Detail:   "ACP steer queued",
+	}
+}
+
+func (t *turn) nextSteer() (platform.SteerRequest, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.interrupted {
+		t.acceptingSteer = false
+		return platform.SteerRequest{}, false
+	}
+	if len(t.steers) == 0 {
+		t.acceptingSteer = false
+		return platform.SteerRequest{}, false
+	}
+	next := t.steers[0]
+	copy(t.steers, t.steers[1:])
+	t.steers = t.steers[:len(t.steers)-1]
+	return next, true
+}
+
+func (t *turn) interrupt() {
+	t.mu.Lock()
+	t.interrupted = true
+	t.acceptingSteer = false
+	t.steers = nil
+	t.mu.Unlock()
 }
 
 func (t *turn) handleUpdate(update acp.SessionUpdate) error {
@@ -402,6 +465,15 @@ func stableID(runID string, suffix string) string {
 		runID = "run"
 	}
 	return runID + "_" + suffix
+}
+
+func firstNonBlank(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func permissionCommand(update acp.ToolCallUpdate) string {

@@ -119,5 +119,6 @@ When terminal or file-write capabilities are enabled, Claude Code can execute lo
 
 - `POST /api/query` returns platform-compatible SSE with `event: message` and terminal `data: [DONE]`.
 - `POST /api/submit` forwards platform HITL approval responses to ACP `session/request_permission`.
+- `POST /api/steer` queues a follow-up user prompt on the active ACP run.
 - `POST /api/interrupt` sends ACP `session/cancel`.
 - `GET /ws` accepts platform PROXY frames for query, submit, and interrupt.

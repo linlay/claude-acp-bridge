@@ -37,6 +37,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/healthz", s.handleHealthz)
 	s.mux.HandleFunc("/api/query", s.withAuth(http.MethodPost, s.handleQuery))
 	s.mux.HandleFunc("/api/submit", s.withAuth(http.MethodPost, s.handleSubmit))
+	s.mux.HandleFunc("/api/steer", s.withAuth(http.MethodPost, s.handleSteer))
 	s.mux.HandleFunc("/api/interrupt", s.withAuth(http.MethodPost, s.handleInterrupt))
 	s.mux.HandleFunc("/ws", s.handleWS)
 }
@@ -104,6 +105,15 @@ func (s *Server) handleSubmit(w http.ResponseWriter, r *http.Request) {
 	platform.WriteJSON(w, http.StatusOK, platform.Success(resp))
 }
 
+func (s *Server) handleSteer(w http.ResponseWriter, r *http.Request) {
+	var req platform.SteerRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.RunID) == "" || strings.TrimSpace(req.Message) == "" {
+		platform.WriteJSON(w, http.StatusBadRequest, platform.Failure(http.StatusBadRequest, "runId and message are required"))
+		return
+	}
+	platform.WriteJSON(w, http.StatusOK, platform.Success(s.manager.Steer(req)))
+}
+
 func (s *Server) handleInterrupt(w http.ResponseWriter, r *http.Request) {
 	var req platform.InterruptRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.RunID) == "" {
@@ -146,6 +156,8 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			go s.wsQuery(connCtx, conn, frame)
 		case "request.submit", "/api/submit":
 			s.wsSubmit(conn, frame)
+		case "request.steer", "/api/steer":
+			s.wsSteer(conn, frame)
 		case "request.interrupt", "/api/interrupt":
 			s.wsInterrupt(conn, frame)
 		default:
@@ -177,6 +189,16 @@ func (s *Server) wsSubmit(conn *websocket.Conn, frame requestFrame) {
 		return
 	}
 	resp, _ := s.manager.Submit(req)
+	writeWS(conn, responseFrame{Frame: "response", Type: frame.Type, ID: frame.ID, Code: 0, Msg: "success", Data: resp})
+}
+
+func (s *Server) wsSteer(conn *websocket.Conn, frame requestFrame) {
+	req, err := platform.DecodeJSON[platform.SteerRequest](frame.Payload)
+	if err != nil || strings.TrimSpace(req.RunID) == "" || strings.TrimSpace(req.Message) == "" {
+		writeWS(conn, errorFrame{Frame: "error", ID: frame.ID, Type: "invalid_request", Code: 400, Msg: "invalid steer payload"})
+		return
+	}
+	resp := s.manager.Steer(req)
 	writeWS(conn, responseFrame{Frame: "response", Type: frame.Type, ID: frame.ID, Code: 0, Msg: "success", Data: resp})
 }
 

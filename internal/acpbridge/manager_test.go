@@ -180,6 +180,66 @@ func TestManagerSubmitResolvesACPPermission(t *testing.T) {
 	}
 }
 
+func TestManagerSteerQueuesFollowUpPromptBeforeRunComplete(t *testing.T) {
+	m := NewManager(testConfig(t))
+	defer m.Close()
+
+	sink := &recordingSink{}
+	done := make(chan error, 1)
+	go func() {
+		done <- m.Execute(context.Background(), platform.QueryRequest{
+			RequestID: "req_steer",
+			RunID:     "run_steer",
+			ChatID:    "chat_steer",
+			AgentKey:  "fake",
+			Message:   "needs permission",
+			Params:    testParams(t),
+		}, sink)
+	}()
+
+	var awaitingID string
+	for i := 0; i < 200; i++ {
+		for _, event := range sink.snapshot() {
+			if event.Type == "awaiting.ask" {
+				awaitingID, _ = event.Payload["awaitingId"].(string)
+				break
+			}
+		}
+		if awaitingID != "" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if awaitingID == "" {
+		t.Fatalf("expected awaiting.ask, got %#v", eventTypes(sink.snapshot()))
+	}
+
+	steer := m.Steer(platform.SteerRequest{RunID: "run_steer", ChatID: "chat_steer", Message: "after steer"})
+	if !steer.Accepted || steer.SteerID == "" {
+		t.Fatalf("steer response = %#v", steer)
+	}
+	resp, ok := m.Submit(platform.SubmitRequest{
+		RunID:      "run_steer",
+		AwaitingID: awaitingID,
+		Params:     []map[string]any{{"id": "allow", "decision": "approve"}},
+	})
+	if !ok || !resp.Accepted {
+		t.Fatalf("submit response = %#v ok=%v", resp, ok)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	types := eventTypes(sink.snapshot())
+	if !contains(types, "request.steer") {
+		t.Fatalf("expected request.steer, got %#v", types)
+	}
+	if !containsDelta(sink.snapshot(), "after steer") {
+		t.Fatalf("expected queued steer prompt output, got %#v", sink.snapshot())
+	}
+	assertEventOrder(t, types, "request.steer", "run.complete")
+}
+
 func TestManagerSubmitResolvesQuestionAwaiting(t *testing.T) {
 	m := NewManager(testConfig(t))
 	defer m.Close()
@@ -473,4 +533,30 @@ func contains(items []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func containsDelta(events []platform.EventData, want string) bool {
+	for _, event := range events {
+		if event.Type == "content.delta" && event.Payload["delta"] == want {
+			return true
+		}
+	}
+	return false
+}
+
+func assertEventOrder(t *testing.T, events []string, before string, after string) {
+	t.Helper()
+	beforeIndex := -1
+	afterIndex := -1
+	for idx, event := range events {
+		if event == before && beforeIndex < 0 {
+			beforeIndex = idx
+		}
+		if event == after && afterIndex < 0 {
+			afterIndex = idx
+		}
+	}
+	if beforeIndex < 0 || afterIndex < 0 || beforeIndex >= afterIndex {
+		t.Fatalf("expected %s before %s, got %#v", before, after, events)
+	}
 }

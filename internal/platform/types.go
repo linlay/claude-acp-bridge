@@ -49,6 +49,16 @@ type SubmitRequest struct {
 	Params     []map[string]any `json:"params"`
 }
 
+type SteerRequest struct {
+	RequestID string `json:"requestId,omitempty"`
+	ChatID    string `json:"chatId,omitempty"`
+	RunID     string `json:"runId"`
+	SteerID   string `json:"steerId,omitempty"`
+	AgentKey  string `json:"agentKey,omitempty"`
+	TeamID    string `json:"teamId,omitempty"`
+	Message   string `json:"message"`
+}
+
 type InterruptRequest struct {
 	RequestID string `json:"requestId,omitempty"`
 	ChatID    string `json:"chatId,omitempty"`
@@ -64,6 +74,14 @@ type SubmitResponse struct {
 	RunID      string `json:"runId"`
 	AwaitingID string `json:"awaitingId"`
 	Detail     string `json:"detail"`
+}
+
+type SteerResponse struct {
+	Accepted bool   `json:"accepted"`
+	Status   string `json:"status"`
+	RunID    string `json:"runId"`
+	SteerID  string `json:"steerId"`
+	Detail   string `json:"detail"`
 }
 
 type InterruptResponse struct {
@@ -241,6 +259,8 @@ func orderedPayloadKeys(eventType string) []string {
 		return []string{"requestId", "chatId", "runId", "awaitingId", "params"}
 	case "awaiting.answer":
 		return []string{"awaitingId", "mode", "status", "answers", "approvals", "error"}
+	case "request.steer":
+		return []string{"requestId", "chatId", "runId", "steerId", "message"}
 	case "plan.create", "plan.update":
 		return []string{"planId", "chatId", "plan"}
 	case "run.complete":
