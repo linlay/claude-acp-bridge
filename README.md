@@ -48,7 +48,8 @@ make test
 
 - `config.example.yml` is the committed example configuration.
 - `config.yml` and `config.yaml` are local-only files and must not be committed.
-- `authToken` is optional. When set, clients must send `Authorization: Bearer <token>` or `?token=<token>`.
+- `authToken` is optional and defaults to empty, which leaves API routes unauthenticated. When set, clients must send `Authorization: Bearer <token>` or `?token=<token>`. For `agent-platform` PROXY agents, configure `proxyConfig.token` or `proxyConfig.tokenEnv` only when `authToken` is set upstream.
+- `agent-platform` PROXY request timeout defaults to `300000ms`; `proxyConfig.timeoutMs` is only needed when overriding that default.
 - `backends[].key` selects an ACP backend. Request `params.backend` wins, then `agentKey`, then `defaultBackend`.
 - `backends[].command` and `backends[].args` define the ACP stdio command.
 - At least one backend must be configured. `claude-code` is a conventional key for the local Claude Code wrapper, but its command and args must be explicit.
