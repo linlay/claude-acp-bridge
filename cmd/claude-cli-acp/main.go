@@ -40,27 +40,60 @@ type agent struct {
 }
 
 type streamEvent struct {
-	Type    string `json:"type"`
-	Subtype string `json:"subtype"`
-	Result  string `json:"result"`
-	IsError bool   `json:"is_error"`
-	Event   *struct {
-		Type  string `json:"type"`
+	Type      string `json:"type"`
+	Subtype   string `json:"subtype"`
+	Result    string `json:"result"`
+	IsError   bool   `json:"is_error"`
+	SessionID string `json:"session_id"`
+	Event     *struct {
+		Type         string `json:"type"`
+		Index        int    `json:"index"`
+		ContentBlock *struct {
+			Type  string         `json:"type"`
+			ID    string         `json:"id"`
+			Name  string         `json:"name"`
+			Input map[string]any `json:"input"`
+		} `json:"content_block"`
 		Delta *struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
+			Type        string `json:"type"`
+			Text        string `json:"text"`
+			PartialJSON string `json:"partial_json"`
 		} `json:"delta"`
 	} `json:"event"`
 	Message *struct {
 		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
+			Type  string         `json:"type"`
+			Text  string         `json:"text"`
+			ID    string         `json:"id"`
+			Name  string         `json:"name"`
+			Input map[string]any `json:"input"`
 		} `json:"content"`
 	} `json:"message"`
 }
 
+type claudeQuestion struct {
+	toolUseID string
+	payload   map[string]any
+}
+
+type partialToolUse struct {
+	id      string
+	name    string
+	builder strings.Builder
+}
+
+type parseResult struct {
+	chunks          []string
+	question        *claudeQuestion
+	claudeSessionID string
+}
+
 type claudeStreamParser struct {
 	partialSeen bool
+	question    *claudeQuestion
+	sessionID   string
+	suppress    bool
+	tools       map[int]*partialToolUse
 }
 
 func main() {
@@ -103,71 +136,181 @@ func (a *agent) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Promp
 		return acp.PromptResponse{StopReason: acp.StopReasonEndTurn}, nil
 	}
 
-	cmd := exec.CommandContext(ctx, a.claudeCommand, claudePromptArgs(a.claudeArgs, text)...)
+	result, err := a.runClaude(ctx, params.SessionId, cwd, claudePromptArgs(a.claudeArgs, text))
+	if err != nil {
+		return acp.PromptResponse{}, err
+	}
+	if result.question != nil {
+		followup, err := a.askUserQuestion(ctx, params.SessionId, result.question)
+		if err != nil {
+			return acp.PromptResponse{}, err
+		}
+		if result.claudeSessionID != "" && followup != "" {
+			if _, err := a.runClaude(ctx, params.SessionId, cwd, claudeResumeArgs(a.claudeArgs, result.claudeSessionID, followup)); err != nil {
+				return acp.PromptResponse{}, err
+			}
+		}
+	}
+	return acp.PromptResponse{StopReason: acp.StopReasonEndTurn}, nil
+}
+
+func (a *agent) runClaude(ctx context.Context, sessionID acp.SessionId, cwd string, args []string) (parseResult, error) {
+	cmd := exec.CommandContext(ctx, a.claudeCommand, args...)
 	cmd.Dir = cwd
 	cmd.Env = os.Environ()
 	cmd.Stderr = os.Stderr
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return acp.PromptResponse{}, err
+		return parseResult{}, err
 	}
 	if err := cmd.Start(); err != nil {
-		return acp.PromptResponse{}, err
+		return parseResult{}, err
 	}
 
-	a.setActive(params.SessionId, cmd)
-	defer a.clearActive(params.SessionId, cmd)
+	a.setActive(sessionID, cmd)
+	defer a.clearActive(sessionID, cmd)
 
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	parser := &claudeStreamParser{}
+	var result parseResult
 	for scanner.Scan() {
-		if err := a.handleLine(ctx, params.SessionId, parser, scanner.Bytes()); err != nil {
+		parsed, err := a.handleLine(ctx, sessionID, parser, scanner.Bytes())
+		if parsed.question != nil {
+			result.question = parsed.question
+		}
+		if parsed.claudeSessionID != "" {
+			result.claudeSessionID = parsed.claudeSessionID
+		}
+		if err != nil {
 			_ = cmd.Process.Kill()
 			_ = cmd.Wait()
-			return acp.PromptResponse{}, err
+			return result, err
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
-		return acp.PromptResponse{}, err
+		return result, err
 	}
 	if err := cmd.Wait(); err != nil {
-		return acp.PromptResponse{}, err
+		if result.question != nil {
+			return result, nil
+		}
+		return result, err
 	}
-	return acp.PromptResponse{StopReason: acp.StopReasonEndTurn}, nil
+	return result, nil
 }
 
-func (a *agent) handleLine(ctx context.Context, sessionID acp.SessionId, parser *claudeStreamParser, line []byte) error {
-	chunks, err := parser.parseLine(line)
-	for _, chunk := range chunks {
+func (a *agent) handleLine(ctx context.Context, sessionID acp.SessionId, parser *claudeStreamParser, line []byte) (parseResult, error) {
+	parsed, err := parser.parseLine(line)
+	for _, chunk := range parsed.chunks {
 		if err := a.conn.SessionUpdate(ctx, acp.SessionNotification{
 			SessionId: sessionID,
 			Update:    acp.UpdateAgentMessageText(chunk),
 		}); err != nil {
-			return err
+			return parsed, err
 		}
 	}
-	return err
+	return parsed, err
 }
 
-func (p *claudeStreamParser) parseLine(line []byte) ([]string, error) {
+func (a *agent) askUserQuestion(ctx context.Context, sessionID acp.SessionId, question *claudeQuestion) (string, error) {
+	resp, err := a.conn.RequestPermission(ctx, acp.RequestPermissionRequest{
+		SessionId: sessionID,
+		ToolCall: acp.ToolCallUpdate{
+			ToolCallId: acp.ToolCallId(question.toolUseID),
+			Title:      acp.Ptr("AskUserQuestion"),
+			RawInput:   question.payload,
+		},
+		Options: []acp.PermissionOption{
+			{Kind: acp.PermissionOptionKindAllowOnce, Name: "Submit answer", OptionId: acp.PermissionOptionId("submitted")},
+			{Kind: acp.PermissionOptionKindRejectOnce, Name: "Cancel", OptionId: acp.PermissionOptionId("cancelled")},
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	if resp.Outcome.Cancelled != nil {
+		return "用户取消了该问题。", nil
+	}
+	if resp.Outcome.Selected == nil {
+		return "", nil
+	}
+	if text, _ := resp.Outcome.Selected.Meta["answerText"].(string); strings.TrimSpace(text) != "" {
+		return "用户回答了以下问题：\n" + text, nil
+	}
+	return "用户已经回答了该问题，请继续。", nil
+}
+
+func (p *claudeStreamParser) parseLine(line []byte) (parseResult, error) {
 	var event streamEvent
 	if err := json.Unmarshal(line, &event); err != nil {
-		return nil, nil
+		return parseResult{}, nil
+	}
+	result := parseResult{}
+	if event.SessionID != "" {
+		p.sessionID = event.SessionID
+		result.claudeSessionID = event.SessionID
+	}
+	if event.Type == "stream_event" && event.Event != nil &&
+		event.Event.Type == "content_block_start" &&
+		event.Event.ContentBlock != nil &&
+		event.Event.ContentBlock.Type == "tool_use" {
+		if p.tools == nil {
+			p.tools = map[int]*partialToolUse{}
+		}
+		p.tools[event.Event.Index] = &partialToolUse{id: event.Event.ContentBlock.ID, name: event.Event.ContentBlock.Name}
+		if event.Event.ContentBlock.Name == "AskUserQuestion" {
+			p.suppress = true
+		}
+		return result, nil
+	}
+	if event.Type == "stream_event" && event.Event != nil &&
+		event.Event.Type == "content_block_delta" &&
+		event.Event.Delta != nil &&
+		event.Event.Delta.Type == "input_json_delta" {
+		if tool := p.tools[event.Event.Index]; tool != nil {
+			tool.builder.WriteString(event.Event.Delta.PartialJSON)
+		}
+		return result, nil
+	}
+	if event.Type == "stream_event" && event.Event != nil &&
+		event.Event.Type == "content_block_stop" {
+		if tool := p.tools[event.Event.Index]; tool != nil {
+			delete(p.tools, event.Event.Index)
+			if tool.name == "AskUserQuestion" {
+				var input map[string]any
+				if err := json.Unmarshal([]byte(tool.builder.String()), &input); err == nil {
+					payload := normalizeQuestionPayload(input)
+					if len(payload) > 0 {
+						question := &claudeQuestion{toolUseID: tool.id, payload: payload}
+						p.question = question
+						result.question = question
+					}
+				}
+			}
+		}
+		return result, nil
 	}
 	if event.Type == "stream_event" && event.Event != nil &&
 		event.Event.Type == "content_block_delta" &&
 		event.Event.Delta != nil &&
 		event.Event.Delta.Type == "text_delta" &&
-		event.Event.Delta.Text != "" {
+		event.Event.Delta.Text != "" && !p.suppress {
 		p.partialSeen = true
-		return []string{event.Event.Delta.Text}, nil
+		result.chunks = []string{event.Event.Delta.Text}
+		return result, nil
 	}
 	if event.Type == "assistant" && event.Message != nil {
+		if question := questionFromAssistant(event.Message.Content); question != nil {
+			p.question = question
+			p.suppress = true
+			result.question = question
+			return result, nil
+		}
 		if p.partialSeen {
-			return nil, nil
+			return result, nil
 		}
 		var chunks []string
 		for _, block := range event.Message.Content {
@@ -175,16 +318,120 @@ func (p *claudeStreamParser) parseLine(line []byte) ([]string, error) {
 				chunks = append(chunks, block.Text)
 			}
 		}
-		return chunks, nil
+		result.chunks = chunks
+		return result, nil
 	}
 	if event.Type == "result" && event.IsError {
 		var chunks []string
-		if event.Result != "" {
+		if event.Result != "" && !p.suppress {
 			chunks = append(chunks, event.Result)
 		}
-		return chunks, errClaudeCLI
+		result.chunks = chunks
+		if p.suppress {
+			return result, nil
+		}
+		return result, errClaudeCLI
 	}
-	return nil, nil
+	return result, nil
+}
+
+func questionFromAssistant(blocks []struct {
+	Type  string         `json:"type"`
+	Text  string         `json:"text"`
+	ID    string         `json:"id"`
+	Name  string         `json:"name"`
+	Input map[string]any `json:"input"`
+}) *claudeQuestion {
+	for _, block := range blocks {
+		if block.Type != "tool_use" || block.Name != "AskUserQuestion" {
+			continue
+		}
+		payload := normalizeQuestionPayload(block.Input)
+		if len(payload) == 0 {
+			return nil
+		}
+		id := block.ID
+		if id == "" {
+			id = "AskUserQuestion"
+		}
+		return &claudeQuestion{toolUseID: id, payload: payload}
+	}
+	return nil
+}
+
+func normalizeQuestionPayload(input map[string]any) map[string]any {
+	questions, ok := sliceOfMaps(input["questions"])
+	if !ok || len(questions) == 0 {
+		return nil
+	}
+	outQuestions := make([]map[string]any, 0, len(questions))
+	for idx, question := range questions {
+		q := cloneMap(question)
+		id, _ := q["id"].(string)
+		if strings.TrimSpace(id) == "" {
+			id = fmt.Sprintf("q%d", idx+1)
+			q["id"] = id
+		}
+		if _, ok := q["type"].(string); !ok {
+			if _, hasOptions := q["options"]; hasOptions {
+				if boolValue(q["multiSelect"]) || boolValue(q["multiple"]) {
+					q["type"] = "multi-select"
+				} else {
+					q["type"] = "select"
+				}
+			}
+		}
+		delete(q, "multiSelect")
+		delete(q, "multiple")
+		if options, ok := sliceOfMaps(q["options"]); ok {
+			normalizedOptions := make([]map[string]any, 0, len(options))
+			for optionIdx, option := range options {
+				o := cloneMap(option)
+				if optID, _ := o["id"].(string); strings.TrimSpace(optID) == "" {
+					o["id"] = fmt.Sprintf("%s_o%d", id, optionIdx+1)
+				}
+				normalizedOptions = append(normalizedOptions, o)
+			}
+			q["options"] = normalizedOptions
+		}
+		outQuestions = append(outQuestions, q)
+	}
+	return map[string]any{
+		"mode":      "question",
+		"questions": outQuestions,
+	}
+}
+
+func sliceOfMaps(value any) ([]map[string]any, bool) {
+	switch typed := value.(type) {
+	case []map[string]any:
+		return typed, true
+	case []any:
+		out := make([]map[string]any, 0, len(typed))
+		for _, item := range typed {
+			m, ok := item.(map[string]any)
+			if !ok {
+				return nil, false
+			}
+			out = append(out, m)
+		}
+		return out, true
+	default:
+		return nil, false
+	}
+}
+
+func cloneMap(in map[string]any) map[string]any {
+	out := make(map[string]any, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
+}
+
+func boolValue(value any) bool {
+	typed, _ := value.(bool)
+	return typed
 }
 
 func (a *agent) Cancel(_ context.Context, params acp.CancelNotification) error {
@@ -277,10 +524,18 @@ func claudePromptArgs(base []string, text string) []string {
 	if !hasArg(args, "--include-partial-messages") {
 		args = append(args, "--include-partial-messages")
 	}
-	if !hasArg(args, "--permission-mode") && !hasArg(args, "--permission-mode=") {
-		args = append(args, "--permission-mode", "dontAsk")
-	}
 	return append(args, text)
+}
+
+func claudeResumeArgs(base []string, sessionID string, text string) []string {
+	args := claudePromptArgs(base, text)
+	if sessionID == "" || hasArg(args, "--resume") || hasArg(args, "--resume=") || hasArg(args, "--continue") {
+		return args
+	}
+	prompt := args[len(args)-1]
+	args = args[:len(args)-1]
+	args = append(args, "--resume", sessionID, prompt)
+	return args
 }
 
 func hasArg(args []string, name string) bool {

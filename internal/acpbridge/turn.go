@@ -33,7 +33,9 @@ type turn struct {
 type pendingPermission struct {
 	runID      string
 	awaitingID string
+	mode       string
 	options    []acp.PermissionOption
+	questions  []map[string]any
 	response   chan acp.RequestPermissionOutcome
 	done       chan struct{}
 }
@@ -249,10 +251,17 @@ func (t *turn) closeOpenTools() {
 
 func (t *turn) requestPermission(ctx context.Context, params acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
 	awaitingID := stableID(t.req.RunID, "perm_"+string(params.ToolCall.ToolCallId))
+	mode := "approval"
+	questions := questionPayload(params.ToolCall.RawInput)
+	if len(questions) > 0 {
+		mode = "question"
+	}
 	pending := &pendingPermission{
 		runID:      t.req.RunID,
 		awaitingID: awaitingID,
+		mode:       mode,
 		options:    params.Options,
+		questions:  questions,
 		response:   make(chan acp.RequestPermissionOutcome, 1),
 		done:       make(chan struct{}),
 	}
@@ -262,39 +271,70 @@ func (t *turn) requestPermission(ctx context.Context, params acp.RequestPermissi
 		t.mgr.unregisterAwaiting(awaitingID, pending)
 	}()
 
-	approvals := make([]map[string]any, 0, len(params.Options))
-	for _, option := range params.Options {
-		approvals = append(approvals, map[string]any{
-			"id":          string(option.OptionId),
-			"command":     permissionCommand(params.ToolCall),
-			"description": option.Name,
-			"options": []map[string]any{
-				{"label": option.Name, "decision": decisionForOption(option.Kind)},
-				{"label": "Reject", "decision": "reject"},
-			},
-			"allowFreeText": true,
+	if mode == "question" {
+		t.emit("awaiting.ask", map[string]any{
+			"awaitingId":   awaitingID,
+			"mode":         "question",
+			"viewportType": "builtin",
+			"viewportKey":  "question",
+			"timeout":      int64(120000),
+			"runId":        t.req.RunID,
+			"questions":    questions,
+		})
+	} else {
+		approvals := make([]map[string]any, 0, len(params.Options))
+		for _, option := range params.Options {
+			approvals = append(approvals, map[string]any{
+				"id":          string(option.OptionId),
+				"command":     permissionCommand(params.ToolCall),
+				"description": option.Name,
+				"options": []map[string]any{
+					{"label": option.Name, "decision": decisionForOption(option.Kind)},
+					{"label": "Reject", "decision": "reject"},
+				},
+				"allowFreeText": true,
+			})
+		}
+		t.emit("awaiting.ask", map[string]any{
+			"awaitingId":   awaitingID,
+			"mode":         "approval",
+			"viewportType": "builtin",
+			"viewportKey":  "approval",
+			"timeout":      int64(120000),
+			"runId":        t.req.RunID,
+			"approvals":    approvals,
 		})
 	}
-	t.emit("awaiting.ask", map[string]any{
-		"awaitingId":   awaitingID,
-		"mode":         "approval",
-		"viewportType": "builtin",
-		"viewportKey":  "approval",
-		"timeout":      int64(120000),
-		"runId":        t.req.RunID,
-		"approvals":    approvals,
-	})
 
 	select {
 	case outcome := <-pending.response:
-		t.emit("request.submit", map[string]any{"runId": t.req.RunID, "chatId": t.req.ChatID, "awaitingId": awaitingID, "params": outcomePayload(outcome)})
-		t.emit("awaiting.answer", map[string]any{"awaitingId": awaitingID, "mode": "approval", "status": "answered", "approvals": outcomePayload(outcome)})
+		if mode == "question" {
+			paramsPayload, _ := outcomeMeta(outcome, "params").([]map[string]any)
+			answers, _ := outcomeMeta(outcome, "answers").([]map[string]any)
+			if paramsPayload == nil {
+				paramsPayload = []map[string]any{}
+			}
+			t.emit("request.submit", map[string]any{"runId": t.req.RunID, "chatId": t.req.ChatID, "awaitingId": awaitingID, "params": paramsPayload})
+			if outcome.Cancelled != nil {
+				t.emit("awaiting.answer", map[string]any{
+					"awaitingId": awaitingID,
+					"mode":       "question",
+					"status":     "error",
+					"error":      map[string]any{"code": "user_dismissed", "message": "用户取消了该问题"},
+				})
+			} else {
+				t.emit("awaiting.answer", map[string]any{"awaitingId": awaitingID, "mode": "question", "status": "answered", "answers": answers})
+			}
+		} else {
+			t.emit("request.submit", map[string]any{"runId": t.req.RunID, "chatId": t.req.ChatID, "awaitingId": awaitingID, "params": outcomePayload(outcome)})
+			t.emit("awaiting.answer", map[string]any{"awaitingId": awaitingID, "mode": "approval", "status": "answered", "approvals": outcomePayload(outcome)})
+		}
 		return acp.RequestPermissionResponse{Outcome: outcome}, nil
 	case <-ctx.Done():
 		outcome := acp.RequestPermissionOutcome{Cancelled: &acp.RequestPermissionOutcomeCancelled{}}
 		t.emit("awaiting.answer", map[string]any{
 			"awaitingId": awaitingID,
-			"mode":       "approval",
+			"mode":       mode,
 			"status":     "error",
 			"error":      map[string]any{"code": "timeout", "message": ctx.Err().Error()},
 		})
@@ -411,6 +451,116 @@ func permissionOutcomeFromSubmit(params []map[string]any, options []acp.Permissi
 	return acp.RequestPermissionOutcome{Selected: &acp.RequestPermissionOutcomeSelected{OptionId: acp.PermissionOptionId(id)}}
 }
 
+func questionPayload(raw any) []map[string]any {
+	input, ok := raw.(map[string]any)
+	if !ok {
+		return nil
+	}
+	mode, _ := input["mode"].(string)
+	if mode != "question" {
+		return nil
+	}
+	switch questions := input["questions"].(type) {
+	case []map[string]any:
+		return cloneMapSlice(questions)
+	case []any:
+		out := make([]map[string]any, 0, len(questions))
+		for _, item := range questions {
+			question, ok := item.(map[string]any)
+			if !ok {
+				return nil
+			}
+			out = append(out, cloneAnyMap(question))
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func questionOutcomeFromSubmit(params []map[string]any, questions []map[string]any) acp.RequestPermissionOutcome {
+	if len(params) == 0 {
+		return acp.RequestPermissionOutcome{
+			Cancelled: &acp.RequestPermissionOutcomeCancelled{},
+			Selected:  nil,
+		}
+	}
+	answers := normalizeQuestionAnswers(params, questions)
+	return acp.RequestPermissionOutcome{Selected: &acp.RequestPermissionOutcomeSelected{
+		OptionId: acp.PermissionOptionId("submitted"),
+		Meta: map[string]any{
+			"params":     cloneMapSlice(params),
+			"answers":    answers,
+			"answerText": answerText(answers),
+		},
+	}}
+}
+
+func normalizeQuestionAnswers(params []map[string]any, questions []map[string]any) []map[string]any {
+	out := make([]map[string]any, 0, len(params))
+	for idx, param := range params {
+		answer := cloneAnyMap(param)
+		if idx < len(questions) {
+			if id, _ := questions[idx]["id"].(string); id != "" {
+				answer["id"] = id
+			}
+			if question, _ := questions[idx]["question"].(string); question != "" {
+				answer["question"] = question
+			}
+		}
+		out = append(out, answer)
+	}
+	return out
+}
+
+func answerText(answers []map[string]any) string {
+	var lines []string
+	for _, item := range answers {
+		question, _ := item["question"].(string)
+		if question == "" {
+			question, _ = item["id"].(string)
+		}
+		answer := stringifyAnswer(item)
+		if strings.TrimSpace(answer) == "" {
+			continue
+		}
+		if question != "" {
+			lines = append(lines, fmt.Sprintf("- %s：%s", question, answer))
+		} else {
+			lines = append(lines, "- "+answer)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func stringifyAnswer(item map[string]any) string {
+	if value, ok := item["answer"]; ok {
+		return fmt.Sprint(value)
+	}
+	if values, ok := item["answers"]; ok {
+		switch typed := values.(type) {
+		case []string:
+			return strings.Join(typed, ", ")
+		case []any:
+			parts := make([]string, 0, len(typed))
+			for _, value := range typed {
+				parts = append(parts, fmt.Sprint(value))
+			}
+			return strings.Join(parts, ", ")
+		default:
+			return fmt.Sprint(values)
+		}
+	}
+	return ""
+}
+
+func outcomeMeta(outcome acp.RequestPermissionOutcome, key string) any {
+	if outcome.Selected == nil || outcome.Selected.Meta == nil {
+		return nil
+	}
+	return outcome.Selected.Meta[key]
+}
+
 func outcomePayload(outcome acp.RequestPermissionOutcome) []map[string]any {
 	if outcome.Cancelled != nil {
 		return []map[string]any{{"decision": "reject"}}
@@ -419,4 +569,20 @@ func outcomePayload(outcome acp.RequestPermissionOutcome) []map[string]any {
 		return []map[string]any{{"id": string(outcome.Selected.OptionId), "decision": "approve"}}
 	}
 	return []map[string]any{{"decision": "reject"}}
+}
+
+func cloneMapSlice(in []map[string]any) []map[string]any {
+	out := make([]map[string]any, 0, len(in))
+	for _, item := range in {
+		out = append(out, cloneAnyMap(item))
+	}
+	return out
+}
+
+func cloneAnyMap(in map[string]any) map[string]any {
+	out := make(map[string]any, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
 }

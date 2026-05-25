@@ -124,6 +124,137 @@ func TestManagerSubmitResolvesACPPermission(t *testing.T) {
 	}
 }
 
+func TestManagerSubmitResolvesQuestionAwaiting(t *testing.T) {
+	m := NewManager(testConfig(t))
+	defer m.Close()
+
+	sink := &recordingSink{}
+	done := make(chan error, 1)
+	go func() {
+		done <- m.Execute(context.Background(), platform.QueryRequest{
+			RequestID: "req_3",
+			RunID:     "run_3",
+			ChatID:    "chat_3",
+			AgentKey:  "fake",
+			Message:   "needs question",
+		}, sink)
+	}()
+
+	var awaiting platform.EventData
+	for i := 0; i < 200; i++ {
+		for _, event := range sink.snapshot() {
+			if event.Type == "awaiting.ask" && event.Payload["mode"] == "question" {
+				awaiting = event
+				break
+			}
+		}
+		if awaiting.Type != "" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if awaiting.Type == "" {
+		t.Fatalf("expected question awaiting.ask, got %#v", eventTypes(sink.snapshot()))
+	}
+	if got := awaiting.Payload["viewportKey"]; got != "question" {
+		t.Fatalf("viewportKey = %#v", got)
+	}
+	questions, ok := awaiting.Payload["questions"].([]map[string]any)
+	if !ok || len(questions) != 1 {
+		t.Fatalf("questions = %#v", awaiting.Payload["questions"])
+	}
+	awaitingID, _ := awaiting.Payload["awaitingId"].(string)
+	resp, ok := m.Submit(platform.SubmitRequest{
+		RunID:      "run_3",
+		AwaitingID: awaitingID,
+		Params:     []map[string]any{{"answer": "提升代码质量"}},
+	})
+	if !ok || !resp.Accepted {
+		t.Fatalf("submit response = %#v ok=%v", resp, ok)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	var answer platform.EventData
+	var submit platform.EventData
+	for _, event := range sink.snapshot() {
+		if event.Type == "request.submit" {
+			submit = event
+		}
+		if event.Type == "awaiting.answer" && event.Payload["mode"] == "question" {
+			answer = event
+		}
+	}
+	if submit.Type == "" {
+		t.Fatalf("expected request.submit, got %#v", eventTypes(sink.snapshot()))
+	}
+	if answer.Type == "" {
+		t.Fatalf("expected question awaiting.answer, got %#v", eventTypes(sink.snapshot()))
+	}
+	answers, ok := answer.Payload["answers"].([]map[string]any)
+	if !ok || len(answers) != 1 || answers[0]["answer"] != "提升代码质量" {
+		t.Fatalf("answers = %#v", answer.Payload["answers"])
+	}
+	if got := answers[0]["id"]; got != "work_focus" {
+		t.Fatalf("answer question id = %#v", got)
+	}
+}
+
+func TestManagerSubmitDismissesQuestionAwaiting(t *testing.T) {
+	m := NewManager(testConfig(t))
+	defer m.Close()
+
+	sink := &recordingSink{}
+	done := make(chan error, 1)
+	go func() {
+		done <- m.Execute(context.Background(), platform.QueryRequest{
+			RequestID: "req_4",
+			RunID:     "run_4",
+			ChatID:    "chat_4",
+			AgentKey:  "fake",
+			Message:   "needs question",
+		}, sink)
+	}()
+
+	var awaitingID string
+	for i := 0; i < 200; i++ {
+		for _, event := range sink.snapshot() {
+			if event.Type == "awaiting.ask" && event.Payload["mode"] == "question" {
+				awaitingID, _ = event.Payload["awaitingId"].(string)
+				break
+			}
+		}
+		if awaitingID != "" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if awaitingID == "" {
+		t.Fatalf("expected question awaiting.ask, got %#v", eventTypes(sink.snapshot()))
+	}
+	resp, ok := m.Submit(platform.SubmitRequest{RunID: "run_4", AwaitingID: awaitingID, Params: []map[string]any{}})
+	if !ok || !resp.Accepted {
+		t.Fatalf("submit response = %#v ok=%v", resp, ok)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	for _, event := range sink.snapshot() {
+		if event.Type != "awaiting.answer" || event.Payload["mode"] != "question" {
+			continue
+		}
+		if event.Payload["status"] != "error" {
+			t.Fatalf("dismiss status = %#v", event.Payload["status"])
+		}
+		errorPayload, _ := event.Payload["error"].(map[string]any)
+		if errorPayload["code"] != "user_dismissed" {
+			t.Fatalf("dismiss error = %#v", errorPayload)
+		}
+		return
+	}
+	t.Fatalf("expected dismissed awaiting.answer, got %#v", eventTypes(sink.snapshot()))
+}
+
 func TestBridgeClientWriteTextFile(t *testing.T) {
 	client := testBridgeClient(t)
 	path := filepath.Join(t.TempDir(), "note.txt")

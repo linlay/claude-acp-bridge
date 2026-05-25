@@ -106,6 +106,44 @@ func (a *agent) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Promp
 			}
 		}
 	}
+	if strings.Contains(promptText(params), "question") {
+		resp, err := a.conn.RequestPermission(ctx, acp.RequestPermissionRequest{
+			SessionId: params.SessionId,
+			ToolCall: acp.ToolCallUpdate{
+				ToolCallId: acp.ToolCallId("tool_question"),
+				Title:      acp.Ptr("AskUserQuestion"),
+				RawInput: map[string]any{
+					"mode": "question",
+					"questions": []map[string]any{{
+						"id":       "work_focus",
+						"type":     "select",
+						"question": "你目前最希望在工作中优先改进哪个方面？",
+						"header":   "工作重点",
+						"options": []map[string]any{
+							{"label": "提升代码质量", "description": "通过重构、测试覆盖、code review 等方式让代码更健壮、可维护"},
+							{"label": "加快交付速度", "description": "优化开发流程、CI/CD、自动化工具，让功能更快上线"},
+							{"label": "深化技术能力", "description": "学习新技术栈、深入底层原理、扩展架构设计能力"},
+						},
+					}},
+				},
+			},
+			Options: []acp.PermissionOption{
+				{Kind: acp.PermissionOptionKindAllowOnce, Name: "Submit answer", OptionId: acp.PermissionOptionId("submitted")},
+				{Kind: acp.PermissionOptionKindRejectOnce, Name: "Cancel", OptionId: acp.PermissionOptionId("cancelled")},
+			},
+		})
+		if err != nil {
+			return acp.PromptResponse{}, err
+		}
+		if resp.Outcome.Selected != nil {
+			if err := a.conn.SessionUpdate(ctx, acp.SessionNotification{
+				SessionId: params.SessionId,
+				Update:    acp.UpdateAgentMessageText(" answered"),
+			}); err != nil {
+				return acp.PromptResponse{}, err
+			}
+		}
+	}
 	return acp.PromptResponse{StopReason: acp.StopReasonEndTurn}, nil
 }
 

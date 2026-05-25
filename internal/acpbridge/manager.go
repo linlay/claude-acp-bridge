@@ -90,6 +90,9 @@ func (m *Manager) Submit(req platform.SubmitRequest) (platform.SubmitResponse, b
 	}
 
 	outcome := permissionOutcomeFromSubmit(req.Params, pending.options)
+	if pending.mode == "question" {
+		outcome = questionOutcomeFromSubmit(req.Params, pending.questions)
+	}
 	select {
 	case pending.response <- outcome:
 		return platform.SubmitResponse{
