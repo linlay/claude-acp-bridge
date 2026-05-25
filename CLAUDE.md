@@ -8,7 +8,7 @@ Core capabilities:
 
 - Expose platform-compatible HTTP/SSE endpoints.
 - Expose a WebSocket endpoint for platform PROXY frames.
-- Provide a built-in Claude Code ACP backend via `npx -y @agentclientprotocol/claude-agent-acp@latest`.
+- Provide a local `claude-cli-acp` wrapper for running the host Claude Code CLI as an ACP backend.
 - Start and reuse ACP stdio backend sessions by backend, chat, and working directory.
 - Forward HITL permission responses and cancellation requests to ACP sessions.
 
@@ -127,7 +127,7 @@ make clean
 
 - The repository does not currently define Docker or Kubernetes deployment assets.
 - ACP backend commands must be installed separately and available to the service process.
-- The built-in `claude-code` backend requires Node.js/npm on `PATH`; it starts `@agentclientprotocol/claude-agent-acp` through `npx`.
+- The `claude-code` backend should be configured explicitly, usually through the repository's `claude-cli-acp` wrapper and the host Claude Code CLI.
 - Backend processes inherit the service environment plus `backends[].env`.
 - Claude Code defaults to file read, file write, and terminal capabilities enabled. Other backends default to file read only.
 - `config.example.yml` contains illustrative local values only and should be edited before local use.

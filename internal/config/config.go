@@ -15,8 +15,6 @@ const (
 	defaultIdleTimeoutMs = int64(30 * time.Minute / time.Millisecond)
 
 	DefaultClaudeBackendKey = "claude-code"
-	DefaultClaudeCommand    = "npx"
-	DefaultClaudePackage    = "@agentclientprotocol/claude-agent-acp@latest"
 )
 
 type Config struct {
@@ -80,10 +78,8 @@ func (c *Config) Normalize() error {
 	if c.ListenAddr == "" {
 		c.ListenAddr = defaultListenAddr
 	}
-	hadBackends := len(c.Backends) > 0
-	if !hadBackends {
-		c.Backends = []BackendConfig{DefaultClaudeBackend()}
-		c.DefaultBackend = DefaultClaudeBackendKey
+	if len(c.Backends) == 0 {
+		return fmt.Errorf("at least one backend is required")
 	}
 
 	seen := map[string]struct{}{}
@@ -94,16 +90,6 @@ func (c *Config) Normalize() error {
 		backend.DefaultCwd = strings.TrimSpace(backend.DefaultCwd)
 		if backend.Key == "" {
 			return fmt.Errorf("backends[%d].key is required", idx)
-		}
-		if backend.Key == DefaultClaudeBackendKey {
-			commandMissing := backend.Command == ""
-			argsMissing := len(backend.Args) == 0
-			if commandMissing {
-				backend.Command = DefaultClaudeCommand
-				if argsMissing {
-					backend.Args = DefaultClaudeArgs()
-				}
-			}
 		}
 		if backend.Command == "" {
 			return fmt.Errorf("backends[%d].command is required", idx)
@@ -154,18 +140,6 @@ func (c Config) Backend(key string) (BackendConfig, bool) {
 		}
 	}
 	return BackendConfig{}, false
-}
-
-func DefaultClaudeBackend() BackendConfig {
-	return BackendConfig{
-		Key:     DefaultClaudeBackendKey,
-		Command: DefaultClaudeCommand,
-		Args:    DefaultClaudeArgs(),
-	}
-}
-
-func DefaultClaudeArgs() []string {
-	return []string{"-y", DefaultClaudePackage}
 }
 
 func (c *BackendCapabilities) normalize(isClaude bool) {

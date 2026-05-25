@@ -3,13 +3,11 @@ authToken: ""
 defaultBackend: claude-code
 
 backends:
-  # claude-code is also built in: if no backends are configured, proxy-acp starts
-  # `npx -y @agentclientprotocol/claude-agent-acp@latest` by default.
   - key: claude-code
-    command: npx
+    command: ./claude-cli-acp
     args:
-      - -y
-      - "@agentclientprotocol/claude-agent-acp@latest"
+      - -claude
+      - claude
     defaultCwd: /Users/linlay/Project/zenmind
     idleTimeoutMs: 1800000
     env: {}

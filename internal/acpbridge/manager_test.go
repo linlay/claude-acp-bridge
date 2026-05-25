@@ -248,8 +248,8 @@ func testBridgeClient(t *testing.T) *bridgeClient {
 	dir := t.TempDir()
 	cfg := config.BackendConfig{
 		Key:        config.DefaultClaudeBackendKey,
-		Command:    config.DefaultClaudeCommand,
-		Args:       config.DefaultClaudeArgs(),
+		Command:    "claude-cli-acp",
+		Args:       []string{"-claude", "claude"},
 		DefaultCwd: dir,
 	}
 	writes := true
