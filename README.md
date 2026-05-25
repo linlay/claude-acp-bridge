@@ -22,7 +22,7 @@ This project currently supports Claude Code CLI only. Codex CLI is not supported
 
 ```bash
 cp .env.example .env
-# Edit CLAUDE_CODE_CLI in .env when the Claude Code CLI is not named `claude` on PATH.
+# Edit CLAUDE_CLI_ACP, CLAUDE_CODE_CLI, and CLAUDE_CODE_ARGS in .env when needed.
 make build
 make run
 ```
@@ -54,7 +54,9 @@ make test
 - `PROXY_ACP_PORT` defaults to `3210`.
 - `PROXY_ACP_ADDR` defaults to `127.0.0.1` when empty. To allow remote access, set it explicitly, for example `PROXY_ACP_ADDR=0.0.0.0`.
 - `PROXY_ACP_AUTH_TOKEN` defaults to empty, which leaves API routes unauthenticated. When set, clients must send `Authorization: Bearer <token>` or `?token=<token>`. For `agent-platform` PROXY agents, configure `proxyConfig.token` or `proxyConfig.tokenEnv` only when this token is set upstream.
+- `CLAUDE_CLI_ACP` defaults to `./bin/claude-cli-acp` and may be an absolute path.
 - `CLAUDE_CODE_CLI` defaults to `claude` and may be an absolute path.
+- `CLAUDE_CODE_ARGS` defaults to empty and accepts shell-style argument splitting, for example `CLAUDE_CODE_ARGS="--permission-mode dontAsk"`.
 - `PROXY_ACP_IDLE_TIMEOUT_MS` defaults to `1800000`.
 - `agent-platform` PROXY request timeout defaults to `300000ms`; `proxyConfig.timeoutMs` is only needed when overriding that default.
 
@@ -74,10 +76,12 @@ Build local binaries:
 make build
 ```
 
+This writes executable artifacts to `bin/proxy-acp` and `bin/claude-cli-acp`.
+
 Run with an explicit dotenv path:
 
 ```bash
-./proxy-acp -env /path/to/proxy-acp.env
+./bin/proxy-acp -env /path/to/proxy-acp.env
 ```
 
 Deployments should inject sensitive values through platform secrets or environment-specific dotenv files outside source control. This repository does not currently include a Dockerfile or container orchestration definition.
@@ -97,7 +101,7 @@ The service writes process logs to stdout/stderr. Capture those streams through 
 ### Common Checks
 
 - Confirm the configured port and address are reachable.
-- Confirm `claude-cli-acp` is built and the configured Claude Code CLI command exists on `PATH` or is configured by absolute path.
+- Confirm `bin/claude-cli-acp` is built, `CLAUDE_CLI_ACP` points to it when customized, and the configured Claude Code CLI command exists on `PATH` or is configured by absolute path.
 - Confirm `agent-platform` sends `params.cwd` for each query.
 - Confirm the client sends the configured bearer token when `PROXY_ACP_AUTH_TOKEN` is set.
 - Confirm long-running sessions are not being closed by `PROXY_ACP_IDLE_TIMEOUT_MS`.

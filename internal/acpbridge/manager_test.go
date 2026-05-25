@@ -34,6 +34,30 @@ func (s *recordingSink) snapshot() []platform.EventData {
 	return append([]platform.EventData(nil), s.events...)
 }
 
+func TestBackendCommandPathResolvesRelativePaths(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	got, err := backendCommandPath("./bin/claude-cli-acp")
+	if err != nil {
+		t.Fatalf("resolve command: %v", err)
+	}
+	want := filepath.Join(dir, "bin", "claude-cli-acp")
+	if got != want {
+		t.Fatalf("command = %q, want %q", got, want)
+	}
+}
+
+func TestBackendCommandPathLeavesPathLookupCommands(t *testing.T) {
+	got, err := backendCommandPath("claude-cli-acp")
+	if err != nil {
+		t.Fatalf("resolve command: %v", err)
+	}
+	if got != "claude-cli-acp" {
+		t.Fatalf("command = %q, want PATH lookup command", got)
+	}
+}
+
 func TestManagerExecuteMapsACPUpdatesToPlatformEvents(t *testing.T) {
 	m := NewManager(testConfig(t))
 	defer m.Close()

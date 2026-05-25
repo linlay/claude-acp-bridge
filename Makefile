@@ -1,12 +1,14 @@
 APP_NAME := proxy-acp
 CLAUDE_CLI_ACP_NAME := claude-cli-acp
+BIN_DIR := bin
 ENV ?= .env
 
 .PHONY: build run test fmt clean
 
 build:
-	go build -o $(APP_NAME) ./cmd/proxy-acp
-	go build -o $(CLAUDE_CLI_ACP_NAME) ./cmd/claude-cli-acp
+	mkdir -p $(BIN_DIR)
+	go build -o $(BIN_DIR)/$(APP_NAME) ./cmd/proxy-acp
+	go build -o $(BIN_DIR)/$(CLAUDE_CLI_ACP_NAME) ./cmd/claude-cli-acp
 
 run:
 	go run ./cmd/proxy-acp -env $(ENV)
@@ -18,4 +20,4 @@ fmt:
 	gofmt -w cmd internal
 
 clean:
-	rm -f $(APP_NAME) $(CLAUDE_CLI_ACP_NAME)
+	rm -rf $(BIN_DIR)

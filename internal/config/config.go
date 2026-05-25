@@ -14,6 +14,7 @@ const (
 	defaultAddr          = "127.0.0.1"
 	defaultPort          = "3210"
 	defaultClaudeCLI     = "claude"
+	defaultClaudeCLIACP  = "./bin/claude-cli-acp"
 	defaultIdleTimeoutMs = int64(30 * time.Minute / time.Millisecond)
 
 	DefaultClaudeBackendKey = "claude-code"
@@ -70,7 +71,9 @@ func Load(path string) (Config, error) {
 		"PROXY_ACP_PORT",
 		"PROXY_ACP_ADDR",
 		"PROXY_ACP_AUTH_TOKEN",
+		"CLAUDE_CLI_ACP",
 		"CLAUDE_CODE_CLI",
+		"CLAUDE_CODE_ARGS",
 		"PROXY_ACP_IDLE_TIMEOUT_MS",
 	} {
 		if value, ok := os.LookupEnv(key); ok {
@@ -101,6 +104,18 @@ func fromEnv(values map[string]string) (Config, error) {
 	if claudeCLI == "" {
 		claudeCLI = defaultClaudeCLI
 	}
+	claudeCLIACP := strings.TrimSpace(envOrDefault(values, "CLAUDE_CLI_ACP", defaultClaudeCLIACP))
+	if claudeCLIACP == "" {
+		claudeCLIACP = defaultClaudeCLIACP
+	}
+	claudeArgs, err := splitShellArgs(strings.TrimSpace(values["CLAUDE_CODE_ARGS"]))
+	if err != nil {
+		return Config{}, fmt.Errorf("CLAUDE_CODE_ARGS: %w", err)
+	}
+	backendArgs := []string{"-claude", claudeCLI}
+	for _, arg := range claudeArgs {
+		backendArgs = append(backendArgs, "-arg", arg)
+	}
 	idleTimeoutMs := defaultIdleTimeoutMs
 	if raw := strings.TrimSpace(values["PROXY_ACP_IDLE_TIMEOUT_MS"]); raw != "" {
 		parsed, err := strconv.ParseInt(raw, 10, 64)
@@ -116,8 +131,8 @@ func fromEnv(values map[string]string) (Config, error) {
 		DefaultBackend: DefaultClaudeBackendKey,
 		Backends: []BackendConfig{{
 			Key:           DefaultClaudeBackendKey,
-			Command:       "./claude-cli-acp",
-			Args:          []string{"-claude", claudeCLI},
+			Command:       claudeCLIACP,
+			Args:          backendArgs,
 			IdleTimeoutMs: idleTimeoutMs,
 		}},
 	}
@@ -263,6 +278,62 @@ func validatePort(port string) error {
 		return fmt.Errorf("PROXY_ACP_PORT must be an integer from 1 to 65535")
 	}
 	return nil
+}
+
+func splitShellArgs(input string) ([]string, error) {
+	var args []string
+	var current strings.Builder
+	var quote rune
+	escaped := false
+	inArg := false
+
+	for _, r := range input {
+		if escaped {
+			current.WriteRune(r)
+			escaped = false
+			inArg = true
+			continue
+		}
+		if r == '\\' {
+			escaped = true
+			inArg = true
+			continue
+		}
+		if quote != 0 {
+			if r == quote {
+				quote = 0
+			} else {
+				current.WriteRune(r)
+			}
+			inArg = true
+			continue
+		}
+		if r == '\'' || r == '"' {
+			quote = r
+			inArg = true
+			continue
+		}
+		if r == ' ' || r == '\t' || r == '\n' || r == '\r' {
+			if inArg {
+				args = append(args, current.String())
+				current.Reset()
+				inArg = false
+			}
+			continue
+		}
+		current.WriteRune(r)
+		inArg = true
+	}
+	if escaped {
+		return nil, fmt.Errorf("unfinished escape")
+	}
+	if quote != 0 {
+		return nil, fmt.Errorf("unterminated quote")
+	}
+	if inArg {
+		args = append(args, current.String())
+	}
+	return args, nil
 }
 
 func boolPtr(v bool) *bool {

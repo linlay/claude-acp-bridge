@@ -236,7 +236,11 @@ type backendSession struct {
 }
 
 func startBackendSession(ctx context.Context, cfg config.BackendConfig, chatID string, cwd string) (*backendSession, error) {
-	cmd := exec.CommandContext(context.Background(), cfg.Command, cfg.Args...)
+	command, err := backendCommandPath(cfg.Command)
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.CommandContext(context.Background(), command, cfg.Args...)
 	cmd.Dir = cwd
 	cmd.Env = mergeEnv(os.Environ(), cfg.Env)
 	cmd.Stderr = os.Stderr
@@ -292,6 +296,17 @@ func startBackendSession(ctx context.Context, cfg config.BackendConfig, chatID s
 	}
 	sess.sessionID = newSession.SessionId
 	return sess, nil
+}
+
+func backendCommandPath(command string) (string, error) {
+	if !strings.ContainsRune(command, os.PathSeparator) {
+		return command, nil
+	}
+	absolute, err := filepath.Abs(command)
+	if err != nil {
+		return "", fmt.Errorf("resolve backend command %q: %w", command, err)
+	}
+	return absolute, nil
 }
 
 func (s *backendSession) prompt(ctx context.Context, req platform.QueryRequest, t *turn) error {

@@ -130,7 +130,9 @@ make clean
 
 - The repository does not currently define Docker or Kubernetes deployment assets.
 - Claude Code CLI must be installed separately and available to the service process.
+- `CLAUDE_CLI_ACP` configures the ACP wrapper command or path and defaults to `./bin/claude-cli-acp`.
 - `CLAUDE_CODE_CLI` configures the host Claude Code CLI command or absolute path.
+- `CLAUDE_CODE_ARGS` configures extra Claude Code CLI arguments using shell-style splitting.
 - `PROXY_ACP_ADDR` defaults to local-only `127.0.0.1`; remote access requires an explicit value such as `0.0.0.0`.
 - Backend processes inherit the service environment.
 - Claude Code defaults to file read, file write, and terminal capabilities enabled.
