@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -17,6 +18,8 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 )
+
+var errClaudeCLI = errors.New("claude cli returned an error")
 
 type multiFlag []string
 
@@ -41,12 +44,23 @@ type streamEvent struct {
 	Subtype string `json:"subtype"`
 	Result  string `json:"result"`
 	IsError bool   `json:"is_error"`
+	Event   *struct {
+		Type  string `json:"type"`
+		Delta *struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"delta"`
+	} `json:"event"`
 	Message *struct {
 		Content []struct {
 			Type string `json:"type"`
 			Text string `json:"text"`
 		} `json:"content"`
 	} `json:"message"`
+}
+
+type claudeStreamParser struct {
+	partialSeen bool
 }
 
 func main() {
@@ -89,14 +103,7 @@ func (a *agent) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Promp
 		return acp.PromptResponse{StopReason: acp.StopReasonEndTurn}, nil
 	}
 
-	args := append([]string{}, a.claudeArgs...)
-	args = append(args, "-p", "--verbose", "--output-format", "stream-json")
-	if !hasArg(args, "--permission-mode") && !hasArg(args, "--permission-mode=") {
-		args = append(args, "--permission-mode", "dontAsk")
-	}
-	args = append(args, text)
-
-	cmd := exec.CommandContext(ctx, a.claudeCommand, args...)
+	cmd := exec.CommandContext(ctx, a.claudeCommand, claudePromptArgs(a.claudeArgs, text)...)
 	cmd.Dir = cwd
 	cmd.Env = os.Environ()
 	cmd.Stderr = os.Stderr
@@ -113,8 +120,9 @@ func (a *agent) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Promp
 
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	parser := &claudeStreamParser{}
 	for scanner.Scan() {
-		if err := a.handleLine(ctx, params.SessionId, scanner.Bytes()); err != nil {
+		if err := a.handleLine(ctx, params.SessionId, parser, scanner.Bytes()); err != nil {
 			_ = cmd.Process.Kill()
 			_ = cmd.Wait()
 			return acp.PromptResponse{}, err
@@ -131,33 +139,52 @@ func (a *agent) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Promp
 	return acp.PromptResponse{StopReason: acp.StopReasonEndTurn}, nil
 }
 
-func (a *agent) handleLine(ctx context.Context, sessionID acp.SessionId, line []byte) error {
+func (a *agent) handleLine(ctx context.Context, sessionID acp.SessionId, parser *claudeStreamParser, line []byte) error {
+	chunks, err := parser.parseLine(line)
+	for _, chunk := range chunks {
+		if err := a.conn.SessionUpdate(ctx, acp.SessionNotification{
+			SessionId: sessionID,
+			Update:    acp.UpdateAgentMessageText(chunk),
+		}); err != nil {
+			return err
+		}
+	}
+	return err
+}
+
+func (p *claudeStreamParser) parseLine(line []byte) ([]string, error) {
 	var event streamEvent
 	if err := json.Unmarshal(line, &event); err != nil {
-		return nil
+		return nil, nil
+	}
+	if event.Type == "stream_event" && event.Event != nil &&
+		event.Event.Type == "content_block_delta" &&
+		event.Event.Delta != nil &&
+		event.Event.Delta.Type == "text_delta" &&
+		event.Event.Delta.Text != "" {
+		p.partialSeen = true
+		return []string{event.Event.Delta.Text}, nil
 	}
 	if event.Type == "assistant" && event.Message != nil {
+		if p.partialSeen {
+			return nil, nil
+		}
+		var chunks []string
 		for _, block := range event.Message.Content {
 			if block.Type == "text" && block.Text != "" {
-				if err := a.conn.SessionUpdate(ctx, acp.SessionNotification{
-					SessionId: sessionID,
-					Update:    acp.UpdateAgentMessageText(block.Text),
-				}); err != nil {
-					return err
-				}
+				chunks = append(chunks, block.Text)
 			}
 		}
+		return chunks, nil
 	}
 	if event.Type == "result" && event.IsError {
+		var chunks []string
 		if event.Result != "" {
-			_ = a.conn.SessionUpdate(ctx, acp.SessionNotification{
-				SessionId: sessionID,
-				Update:    acp.UpdateAgentMessageText(event.Result),
-			})
+			chunks = append(chunks, event.Result)
 		}
-		return fmt.Errorf("claude cli returned an error")
+		return chunks, errClaudeCLI
 	}
-	return nil
+	return nil, nil
 }
 
 func (a *agent) Cancel(_ context.Context, params acp.CancelNotification) error {
@@ -242,6 +269,18 @@ func promptText(params acp.PromptRequest) string {
 		}
 	}
 	return strings.Join(parts, "\n\n")
+}
+
+func claudePromptArgs(base []string, text string) []string {
+	args := append([]string{}, base...)
+	args = append(args, "-p", "--verbose", "--output-format", "stream-json")
+	if !hasArg(args, "--include-partial-messages") {
+		args = append(args, "--include-partial-messages")
+	}
+	if !hasArg(args, "--permission-mode") && !hasArg(args, "--permission-mode=") {
+		args = append(args, "--permission-mode", "dontAsk")
+	}
+	return append(args, text)
 }
 
 func hasArg(args []string, name string) bool {
