@@ -14,10 +14,11 @@ const (
 	defaultAddr          = "127.0.0.1"
 	defaultPort          = "3210"
 	defaultClaudeCLI     = "claude"
-	defaultClaudeCLIACP  = "./bin/claude-cli-acp"
 	defaultIdleTimeoutMs = int64(30 * time.Minute / time.Millisecond)
 
 	DefaultClaudeBackendKey = "claude-code"
+	SelfBackendCommand      = "__proxy-acp-self__"
+	ClaudeBackendModeArg    = "__claude-cli-acp"
 )
 
 type Config struct {
@@ -71,7 +72,6 @@ func Load(path string) (Config, error) {
 		"PROXY_ACP_PORT",
 		"PROXY_ACP_ADDR",
 		"PROXY_ACP_AUTH_TOKEN",
-		"CLAUDE_CLI_ACP",
 		"CLAUDE_CODE_CLI",
 		"CLAUDE_CODE_ARGS",
 		"PROXY_ACP_IDLE_TIMEOUT_MS",
@@ -104,15 +104,11 @@ func fromEnv(values map[string]string) (Config, error) {
 	if claudeCLI == "" {
 		claudeCLI = defaultClaudeCLI
 	}
-	claudeCLIACP := strings.TrimSpace(envOrDefault(values, "CLAUDE_CLI_ACP", defaultClaudeCLIACP))
-	if claudeCLIACP == "" {
-		claudeCLIACP = defaultClaudeCLIACP
-	}
 	claudeArgs, err := splitShellArgs(strings.TrimSpace(values["CLAUDE_CODE_ARGS"]))
 	if err != nil {
 		return Config{}, fmt.Errorf("CLAUDE_CODE_ARGS: %w", err)
 	}
-	backendArgs := []string{"-claude", claudeCLI}
+	backendArgs := []string{ClaudeBackendModeArg, "-claude", claudeCLI}
 	for _, arg := range claudeArgs {
 		backendArgs = append(backendArgs, "-arg", arg)
 	}
@@ -131,7 +127,7 @@ func fromEnv(values map[string]string) (Config, error) {
 		DefaultBackend: DefaultClaudeBackendKey,
 		Backends: []BackendConfig{{
 			Key:           DefaultClaudeBackendKey,
-			Command:       claudeCLIACP,
+			Command:       SelfBackendCommand,
 			Args:          backendArgs,
 			IdleTimeoutMs: idleTimeoutMs,
 		}},

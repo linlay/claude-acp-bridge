@@ -8,7 +8,7 @@ Core capabilities:
 
 - Expose platform-compatible HTTP/SSE endpoints.
 - Expose a WebSocket endpoint for platform PROXY frames.
-- Provide a local `claude-cli-acp` wrapper for running the host Claude Code CLI as an ACP backend.
+- Run an internal ACP backend mode for the host Claude Code CLI from the same `proxy-acp` binary.
 - Start and reuse ACP stdio backend sessions by backend, chat, and working directory.
 - Forward HITL permission responses and cancellation requests to ACP sessions.
 
@@ -29,6 +29,7 @@ Codex CLI is not supported by this repository.
 The service is split into three main layers:
 
 - `cmd/proxy-acp`: process entrypoint, flag parsing, env config loading, HTTP server lifecycle, graceful shutdown.
+- `internal/claudeacp`: internal ACP stdio backend mode for running Claude Code CLI.
 - `internal/server`: HTTP and WebSocket handlers, auth checks, request validation, platform response shaping.
 - `internal/acpbridge`: backend selection, ACP process lifecycle, session reuse, turn execution, permission forwarding, cancellation.
 - `internal/platform`: platform DTOs and HTTP/SSE serialization helpers.
@@ -37,7 +38,7 @@ The service is split into three main layers:
 Request flow:
 
 ```text
-platform client -> internal/server -> internal/acpbridge -> claude-cli-acp -> Claude Code CLI
+platform client -> internal/server -> internal/acpbridge -> proxy-acp hidden ACP mode -> Claude Code CLI
 ```
 
 Backend sessions are keyed by backend key, chat id, and working directory. Active runs are tracked separately so interrupt requests can find the session currently handling a run.
@@ -47,6 +48,7 @@ Backend sessions are keyed by backend key, chat id, and working directory. Activ
 ```text
 cmd/proxy-acp/          Service entrypoint.
 internal/acpbridge/     ACP backend session and turn management.
+internal/claudeacp/     Internal Claude Code ACP backend.
 internal/config/        Dotenv config loading and normalization.
 internal/platform/      Platform request/response/event types.
 internal/server/        HTTP, SSE, WebSocket routes and auth.
@@ -114,10 +116,16 @@ make test
 make run
 ```
 
-Build binaries:
+Build the local binary:
 
 ```bash
 make build
+```
+
+Build the Windows amd64 binary:
+
+```bash
+make build-windows-amd64
 ```
 
 Clean local build output:
@@ -130,7 +138,6 @@ make clean
 
 - The repository does not currently define Docker or Kubernetes deployment assets.
 - Claude Code CLI must be installed separately and available to the service process.
-- `CLAUDE_CLI_ACP` configures the ACP wrapper command or path and defaults to `./bin/claude-cli-acp`.
 - `CLAUDE_CODE_CLI` configures the host Claude Code CLI command or absolute path.
 - `CLAUDE_CODE_ARGS` configures extra Claude Code CLI arguments using shell-style splitting.
 - `PROXY_ACP_ADDR` defaults to local-only `127.0.0.1`; remote access requires an explicit value such as `0.0.0.0`.

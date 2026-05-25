@@ -23,10 +23,10 @@ func TestLoadDefaultsToLocalClaudeBackend(t *testing.T) {
 	if backend.Key != DefaultClaudeBackendKey {
 		t.Fatalf("backend key = %q", backend.Key)
 	}
-	if backend.Command != "./bin/claude-cli-acp" {
+	if backend.Command != SelfBackendCommand {
 		t.Fatalf("backend command = %q", backend.Command)
 	}
-	if got, want := backend.Args, []string{"-claude", "claude"}; strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+	if got, want := backend.Args, []string{ClaudeBackendModeArg, "-claude", "claude"}; strings.Join(got, "\x00") != strings.Join(want, "\x00") {
 		t.Fatalf("args = %#v, want %#v", got, want)
 	}
 	if !backend.Capabilities.ReadTextFile() || !backend.Capabilities.WriteTextFile() || !backend.Capabilities.TerminalEnabled() {
@@ -39,7 +39,6 @@ func TestLoadAppliesEnvOverrides(t *testing.T) {
 	t.Setenv("PROXY_ACP_PORT", "4567")
 	t.Setenv("PROXY_ACP_ADDR", "0.0.0.0")
 	t.Setenv("PROXY_ACP_AUTH_TOKEN", "secret")
-	t.Setenv("CLAUDE_CLI_ACP", "/opt/bin/claude-cli-acp")
 	t.Setenv("CLAUDE_CODE_CLI", "/opt/bin/claude")
 	t.Setenv("CLAUDE_CODE_ARGS", `--permission-mode dontAsk --label "hello world"`)
 	t.Setenv("PROXY_ACP_IDLE_TIMEOUT_MS", "42")
@@ -55,10 +54,11 @@ func TestLoadAppliesEnvOverrides(t *testing.T) {
 		t.Fatalf("auth token = %q", cfg.AuthToken)
 	}
 	backend := cfg.Backends[0]
-	if backend.Command != "/opt/bin/claude-cli-acp" {
+	if backend.Command != SelfBackendCommand {
 		t.Fatalf("backend command = %q", backend.Command)
 	}
 	if got, want := backend.Args, []string{
+		ClaudeBackendModeArg,
 		"-claude", "/opt/bin/claude",
 		"-arg", "--permission-mode",
 		"-arg", "dontAsk",
@@ -80,7 +80,6 @@ func TestLoadDotenvAndProcessEnvPrecedence(t *testing.T) {
 		"PROXY_ACP_PORT=5555",
 		"PROXY_ACP_ADDR=0.0.0.0",
 		"PROXY_ACP_AUTH_TOKEN=from_file",
-		"CLAUDE_CLI_ACP=/file/claude-cli-acp",
 		"CLAUDE_CODE_CLI=/file/claude",
 		"CLAUDE_CODE_ARGS=\"--permission-mode dontAsk\"",
 		"PROXY_ACP_IDLE_TIMEOUT_MS=99",
@@ -89,7 +88,6 @@ func TestLoadDotenvAndProcessEnvPrecedence(t *testing.T) {
 		t.Fatalf("write dotenv: %v", err)
 	}
 	t.Setenv("PROXY_ACP_AUTH_TOKEN", "from_env")
-	t.Setenv("CLAUDE_CLI_ACP", "/env/claude-cli-acp")
 	t.Setenv("CLAUDE_CODE_CLI", "/env/claude")
 	t.Setenv("CLAUDE_CODE_ARGS", "--permission-mode plan")
 
@@ -103,13 +101,13 @@ func TestLoadDotenvAndProcessEnvPrecedence(t *testing.T) {
 	if cfg.AuthToken != "from_env" {
 		t.Fatalf("auth token = %q", cfg.AuthToken)
 	}
-	if got := cfg.Backends[0].Command; got != "/env/claude-cli-acp" {
+	if got := cfg.Backends[0].Command; got != SelfBackendCommand {
 		t.Fatalf("claude cli acp = %q", got)
 	}
-	if got := cfg.Backends[0].Args[1]; got != "/env/claude" {
+	if got := cfg.Backends[0].Args[2]; got != "/env/claude" {
 		t.Fatalf("claude cli = %q", got)
 	}
-	if got, want := cfg.Backends[0].Args[2:], []string{"-arg", "--permission-mode", "-arg", "plan"}; strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+	if got, want := cfg.Backends[0].Args[3:], []string{"-arg", "--permission-mode", "-arg", "plan"}; strings.Join(got, "\x00") != strings.Join(want, "\x00") {
 		t.Fatalf("extra args = %#v, want %#v", got, want)
 	}
 	if cfg.Backends[0].IdleTimeoutMs != 99 {
@@ -171,7 +169,6 @@ func withCleanEnv(t *testing.T) {
 		"PROXY_ACP_PORT",
 		"PROXY_ACP_ADDR",
 		"PROXY_ACP_AUTH_TOKEN",
-		"CLAUDE_CLI_ACP",
 		"CLAUDE_CODE_CLI",
 		"CLAUDE_CODE_ARGS",
 		"PROXY_ACP_IDLE_TIMEOUT_MS",

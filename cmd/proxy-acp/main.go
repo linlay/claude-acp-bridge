@@ -12,11 +12,19 @@ import (
 	"time"
 
 	"proxy-acp/internal/acpbridge"
+	"proxy-acp/internal/claudeacp"
 	"proxy-acp/internal/config"
 	"proxy-acp/internal/server"
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == config.ClaudeBackendModeArg {
+		if err := claudeacp.Run(os.Args[2:]); err != nil {
+			log.Fatalf("run claude ACP backend: %v", err)
+		}
+		return
+	}
+
 	envPath := flag.String("env", "", "Path to proxy-acp dotenv config")
 	flag.Parse()
 

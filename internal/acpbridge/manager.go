@@ -299,7 +299,14 @@ func startBackendSession(ctx context.Context, cfg config.BackendConfig, chatID s
 }
 
 func backendCommandPath(command string) (string, error) {
-	if !strings.ContainsRune(command, os.PathSeparator) {
+	if command == config.SelfBackendCommand {
+		executable, err := os.Executable()
+		if err != nil {
+			return "", fmt.Errorf("resolve current executable: %w", err)
+		}
+		return executable, nil
+	}
+	if !strings.Contains(command, "/") && !strings.Contains(command, `\`) {
 		return command, nil
 	}
 	absolute, err := filepath.Abs(command)

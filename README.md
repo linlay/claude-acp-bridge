@@ -5,7 +5,7 @@
 `proxy-acp` bridges Zenmind `agent-platform` PROXY agents to the local Claude Code CLI through ACP. It exposes the HTTP/SSE and WebSocket surface expected by the platform, then translates requests into ACP stdio sessions.
 
 ```text
-webclient -> agent-platform(PROXY) -> proxy-acp(HTTP/SSE + WS) -> claude-cli-acp -> Claude Code CLI
+webclient -> agent-platform(PROXY) -> proxy-acp(HTTP/SSE + WS + internal ACP backend) -> Claude Code CLI
 ```
 
 This project currently supports Claude Code CLI only. Codex CLI is not supported by this repository.
@@ -22,7 +22,7 @@ This project currently supports Claude Code CLI only. Codex CLI is not supported
 
 ```bash
 cp .env.example .env
-# Edit CLAUDE_CLI_ACP, CLAUDE_CODE_CLI, and CLAUDE_CODE_ARGS in .env when needed.
+# Edit CLAUDE_CODE_CLI and CLAUDE_CODE_ARGS in .env when needed.
 make build
 make run
 ```
@@ -54,7 +54,6 @@ make test
 - `PROXY_ACP_PORT` defaults to `3210`.
 - `PROXY_ACP_ADDR` defaults to `127.0.0.1` when empty. To allow remote access, set it explicitly, for example `PROXY_ACP_ADDR=0.0.0.0`.
 - `PROXY_ACP_AUTH_TOKEN` defaults to empty, which leaves API routes unauthenticated. When set, clients must send `Authorization: Bearer <token>` or `?token=<token>`. For `agent-platform` PROXY agents, configure `proxyConfig.token` or `proxyConfig.tokenEnv` only when this token is set upstream.
-- `CLAUDE_CLI_ACP` defaults to `./bin/claude-cli-acp` and may be an absolute path.
 - `CLAUDE_CODE_CLI` defaults to `claude` and may be an absolute path.
 - `CLAUDE_CODE_ARGS` defaults to empty and accepts shell-style argument splitting, for example `CLAUDE_CODE_ARGS="--permission-mode dontAsk"`.
 - `PROXY_ACP_IDLE_TIMEOUT_MS` defaults to `1800000`.
@@ -70,13 +69,21 @@ Backend processes inherit the `proxy-acp` process environment, so values such as
 
 ## 4. Deployment
 
-Build local binaries:
+Build the local binary:
 
 ```bash
 make build
 ```
 
-This writes executable artifacts to `bin/proxy-acp` and `bin/claude-cli-acp`.
+This writes the single executable artifact to `bin/proxy-acp`.
+
+Build the Windows amd64 binary:
+
+```bash
+make build-windows-amd64
+```
+
+This writes `dist/windows-amd64/proxy-acp.exe`.
 
 Run with an explicit dotenv path:
 
@@ -101,7 +108,7 @@ The service writes process logs to stdout/stderr. Capture those streams through 
 ### Common Checks
 
 - Confirm the configured port and address are reachable.
-- Confirm `bin/claude-cli-acp` is built, `CLAUDE_CLI_ACP` points to it when customized, and the configured Claude Code CLI command exists on `PATH` or is configured by absolute path.
+- Confirm the configured Claude Code CLI command exists on `PATH` or is configured by absolute path.
 - Confirm `agent-platform` sends `params.cwd` for each query.
 - Confirm the client sends the configured bearer token when `PROXY_ACP_AUTH_TOKEN` is set.
 - Confirm long-running sessions are not being closed by `PROXY_ACP_IDLE_TIMEOUT_MS`.

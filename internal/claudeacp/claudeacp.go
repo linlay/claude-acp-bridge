@@ -1,4 +1,4 @@
-package main
+package claudeacp
 
 import (
 	"bufio"
@@ -96,11 +96,15 @@ type claudeStreamParser struct {
 	tools       map[int]*partialToolUse
 }
 
-func main() {
+func Run(args []string) error {
 	var extra multiFlag
-	claudeCommand := flag.String("claude", "claude", "Claude Code CLI command")
-	flag.Var(&extra, "arg", "Extra argument passed to Claude Code CLI, repeatable")
-	flag.Parse()
+	flags := flag.NewFlagSet("claude-cli-acp", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	claudeCommand := flags.String("claude", "claude", "Claude Code CLI command")
+	flags.Var(&extra, "arg", "Extra argument passed to Claude Code CLI, repeatable")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
 
 	a := &agent{
 		claudeCommand: *claudeCommand,
@@ -112,6 +116,7 @@ func main() {
 	conn.SetLogger(slog.Default())
 	a.conn = conn
 	<-conn.Done()
+	return nil
 }
 
 func (a *agent) Initialize(context.Context, acp.InitializeRequest) (acp.InitializeResponse, error) {

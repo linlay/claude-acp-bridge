@@ -38,22 +38,36 @@ func TestBackendCommandPathResolvesRelativePaths(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
 
-	got, err := backendCommandPath("./bin/claude-cli-acp")
+	got, err := backendCommandPath("./bin/custom-acp")
 	if err != nil {
 		t.Fatalf("resolve command: %v", err)
 	}
-	want := filepath.Join(dir, "bin", "claude-cli-acp")
+	want := filepath.Join(dir, "bin", "custom-acp")
 	if got != want {
 		t.Fatalf("command = %q, want %q", got, want)
 	}
 }
 
-func TestBackendCommandPathLeavesPathLookupCommands(t *testing.T) {
-	got, err := backendCommandPath("claude-cli-acp")
+func TestBackendCommandPathResolvesSelfCommand(t *testing.T) {
+	got, err := backendCommandPath(config.SelfBackendCommand)
 	if err != nil {
 		t.Fatalf("resolve command: %v", err)
 	}
-	if got != "claude-cli-acp" {
+	want, err := os.Executable()
+	if err != nil {
+		t.Fatalf("current executable: %v", err)
+	}
+	if got != want {
+		t.Fatalf("command = %q, want current executable %q", got, want)
+	}
+}
+
+func TestBackendCommandPathLeavesPathLookupCommands(t *testing.T) {
+	got, err := backendCommandPath("custom-acp")
+	if err != nil {
+		t.Fatalf("resolve command: %v", err)
+	}
+	if got != "custom-acp" {
 		t.Fatalf("command = %q, want PATH lookup command", got)
 	}
 }
