@@ -24,6 +24,7 @@ type turn struct {
 	mu             sync.Mutex
 	contentOpen    bool
 	contentID      string
+	contentSeq     int
 	reasoningOpen  bool
 	reasoningID    string
 	planSeen       bool
@@ -49,7 +50,6 @@ func newTurn(req platform.QueryRequest, sink EventSink, mgr *Manager) *turn {
 		req:            req,
 		sink:           sink,
 		mgr:            mgr,
-		contentID:      stableID(req.RunID, "content"),
 		reasoningID:    stableID(req.RunID, "reasoning"),
 		toolStarted:    map[string]bool{},
 		toolEnded:      map[string]bool{},
@@ -145,8 +145,8 @@ func (t *turn) handleUpdate(update acp.SessionUpdate) error {
 	case update.AgentMessageChunk != nil:
 		text := contentBlockText(update.AgentMessageChunk.Content)
 		if text != "" {
-			t.ensureContent()
-			t.emit("content.delta", map[string]any{"contentId": t.contentID, "delta": text})
+			contentID := t.ensureContent()
+			t.emit("content.delta", map[string]any{"contentId": contentID, "delta": text})
 		}
 	case update.AgentThoughtChunk != nil:
 		text := contentBlockText(update.AgentThoughtChunk.Content)
@@ -179,14 +179,17 @@ func (t *turn) handleUpdate(update acp.SessionUpdate) error {
 	return nil
 }
 
-func (t *turn) ensureContent() {
+func (t *turn) ensureContent() string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.contentOpen {
-		return
+		return t.contentID
 	}
+	t.contentSeq++
+	t.contentID = stableID(t.req.RunID, fmt.Sprintf("c_%d", t.contentSeq))
 	t.contentOpen = true
 	t.emit("content.start", map[string]any{"contentId": t.contentID, "runId": t.req.RunID})
+	return t.contentID
 }
 
 func (t *turn) ensureReasoning() {
@@ -200,19 +203,25 @@ func (t *turn) ensureReasoning() {
 }
 
 func (t *turn) closeOpenStreams() {
+	t.closeOpenTextStreams()
+	t.closeOpenTools()
+}
+
+func (t *turn) closeOpenTextStreams() {
 	t.mu.Lock()
 	contentOpen := t.contentOpen
+	contentID := t.contentID
 	reasoningOpen := t.reasoningOpen
+	reasoningID := t.reasoningID
 	t.contentOpen = false
 	t.reasoningOpen = false
 	t.mu.Unlock()
 	if reasoningOpen {
-		t.emit("reasoning.end", map[string]any{"reasoningId": t.reasoningID})
+		t.emit("reasoning.end", map[string]any{"reasoningId": reasoningID})
 	}
 	if contentOpen {
-		t.emit("content.end", map[string]any{"contentId": t.contentID})
+		t.emit("content.end", map[string]any{"contentId": contentID})
 	}
-	t.closeOpenTools()
 }
 
 func (t *turn) handleToolStart(tool acp.SessionUpdateToolCall) {
@@ -333,6 +342,8 @@ func (t *turn) requestPermission(ctx context.Context, params acp.RequestPermissi
 		close(pending.done)
 		t.mgr.unregisterAwaiting(awaitingID, pending)
 	}()
+
+	t.closeOpenTextStreams()
 
 	if mode == "question" {
 		t.emit("awaiting.ask", map[string]any{

@@ -315,6 +315,18 @@ func TestManagerSubmitResolvesQuestionAwaiting(t *testing.T) {
 	if got := answers[0]["id"]; got != "work_focus" {
 		t.Fatalf("answer question id = %#v", got)
 	}
+
+	events := sink.snapshot()
+	assertContentEventOrder(t, events, "run_3",
+		"content.start:run_3_c_1",
+		"content.end:run_3_c_1",
+		"awaiting.ask",
+		"request.submit",
+		"awaiting.answer",
+		"content.start:run_3_c_2",
+		"content.end:run_3_c_2",
+		"run.complete",
+	)
 }
 
 func TestManagerSubmitDismissesQuestionAwaiting(t *testing.T) {
@@ -559,4 +571,44 @@ func assertEventOrder(t *testing.T, events []string, before string, after string
 	if beforeIndex < 0 || afterIndex < 0 || beforeIndex >= afterIndex {
 		t.Fatalf("expected %s before %s, got %#v", before, after, events)
 	}
+}
+
+func assertContentEventOrder(t *testing.T, events []platform.EventData, runID string, expected ...string) {
+	t.Helper()
+	positions := make([]int, 0, len(expected))
+	for _, want := range expected {
+		idx := eventPosition(events, want)
+		if idx < 0 {
+			t.Fatalf("missing event %s in %#v", want, eventTypes(events))
+		}
+		if runID != "" {
+			eventRunID, _ := events[idx].Payload["runId"].(string)
+			if eventRunID != "" && eventRunID != runID {
+				t.Fatalf("event %s runId = %q, want %q", want, eventRunID, runID)
+			}
+		}
+		positions = append(positions, idx)
+	}
+	for idx := 1; idx < len(positions); idx++ {
+		if positions[idx-1] >= positions[idx] {
+			t.Fatalf("events out of order: %v at positions %v, types %#v", expected, positions, eventTypes(events))
+		}
+	}
+}
+
+func eventPosition(events []platform.EventData, want string) int {
+	eventType, contentID, hasContentID := strings.Cut(want, ":")
+	for idx, event := range events {
+		if event.Type != eventType {
+			continue
+		}
+		if hasContentID {
+			gotContentID, _ := event.Payload["contentId"].(string)
+			if gotContentID != contentID {
+				continue
+			}
+		}
+		return idx
+	}
+	return -1
 }
