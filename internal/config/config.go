@@ -75,6 +75,10 @@ func Load(path string) (Config, error) {
 		"CLAUDE_CODE_CLI",
 		"CLAUDE_CODE_ARGS",
 		"PROXY_ACP_IDLE_TIMEOUT_MS",
+		"http_proxy",
+		"HTTP_PROXY",
+		"https_proxy",
+		"HTTPS_PROXY",
 	} {
 		if value, ok := os.LookupEnv(key); ok {
 			values[key] = value
@@ -129,10 +133,21 @@ func fromEnv(values map[string]string) (Config, error) {
 			Key:           DefaultClaudeBackendKey,
 			Command:       SelfBackendCommand,
 			Args:          backendArgs,
+			Env:           proxyEnv(values),
 			IdleTimeoutMs: idleTimeoutMs,
 		}},
 	}
 	return cfg, nil
+}
+
+func proxyEnv(values map[string]string) map[string]string {
+	env := map[string]string{}
+	for _, key := range []string{"http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY"} {
+		if value := strings.TrimSpace(values[key]); value != "" {
+			env[key] = value
+		}
+	}
+	return env
 }
 
 func (c *Config) Normalize() error {

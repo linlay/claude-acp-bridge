@@ -56,6 +56,7 @@ make test
 - `PROXY_ACP_AUTH_TOKEN` defaults to empty, which leaves API routes unauthenticated. When set, clients must send `Authorization: Bearer <token>` or `?token=<token>`. For `agent-platform` PROXY agents, configure `proxyConfig.token` or `proxyConfig.tokenEnv` only when this token is set upstream.
 - `CLAUDE_CODE_CLI` defaults to `claude` and may be an absolute path.
 - `CLAUDE_CODE_ARGS` defaults to empty and accepts shell-style argument splitting, for example `CLAUDE_CODE_ARGS="--permission-mode dontAsk"`.
+- `http_proxy`, `HTTP_PROXY`, `https_proxy`, and `HTTPS_PROXY` default to empty. When set in the dotenv file or process environment, non-empty values are passed to the Claude Code CLI backend.
 - `PROXY_ACP_IDLE_TIMEOUT_MS` defaults to `1800000`.
 - `agent-platform` PROXY request timeout defaults to `300000ms`; `proxyConfig.timeoutMs` is only needed when overriding that default.
 
@@ -65,7 +66,7 @@ Configuration priority:
 code defaults < dotenv file < process environment
 ```
 
-Backend processes inherit the `proxy-acp` process environment, so values such as `ANTHROPIC_API_KEY`, `PATH`, and `HOME` come from the Go service process. Commands are launched directly with `exec.Command`, not through a shell, so shell aliases and functions are not inherited.
+Backend processes inherit the `proxy-acp` process environment, so values such as `ANTHROPIC_API_KEY`, `PATH`, and `HOME` come from the Go service process. Proxy variables configured through dotenv are overlaid onto the backend environment before launching Claude Code CLI. Commands are launched directly with `exec.Command`, not through a shell, so shell aliases and functions are not inherited.
 
 ## 4. Deployment
 
