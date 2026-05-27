@@ -151,6 +151,25 @@ func TestClaudePromptArgsIncludesPartialMessagesOnce(t *testing.T) {
 	}
 }
 
+func TestApplyClaudeModelArgs(t *testing.T) {
+	args := applyClaudeModelArgs([]string{"--permission-mode", "plan"}, "claude-sonnet-4-6", "high")
+	want := []string{"--permission-mode", "plan", "--model", "claude-sonnet-4-6", "--effort", "high"}
+	if !reflect.DeepEqual(args, want) {
+		t.Fatalf("args = %#v, want %#v", args, want)
+	}
+
+	promptArgs := claudePromptArgs(args, "hi")
+	if promptArgs[len(promptArgs)-1] != "hi" {
+		t.Fatalf("prompt was not last arg: %#v", promptArgs)
+	}
+	if got := countArg(promptArgs, "--model"); got != 1 {
+		t.Fatalf("model flag count = %d in %#v", got, promptArgs)
+	}
+	if got := countArg(promptArgs, "--effort"); got != 1 {
+		t.Fatalf("effort flag count = %d in %#v", got, promptArgs)
+	}
+}
+
 func countArg(args []string, want string) int {
 	count := 0
 	for _, arg := range args {

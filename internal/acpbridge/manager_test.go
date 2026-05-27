@@ -131,6 +131,49 @@ func TestManagerExecuteRequiresCWDParam(t *testing.T) {
 	}
 }
 
+func TestRequestModelPrefersModelID(t *testing.T) {
+	got := requestModel(platform.QueryRequest{Model: &platform.ModelOptions{Key: "sonnet", ModelID: "claude-sonnet-4-6"}})
+	if got != "claude-sonnet-4-6" {
+		t.Fatalf("model = %q, want modelId", got)
+	}
+	got = requestModel(platform.QueryRequest{Model: &platform.ModelOptions{Key: "opus"}})
+	if got != "opus" {
+		t.Fatalf("model = %q, want key fallback", got)
+	}
+}
+
+func TestRequestReasoningEffortNormalizesPlatformValue(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want string
+	}{
+		{in: "LOW", want: "low"},
+		{in: "medium", want: "medium"},
+		{in: "HIGH", want: "high"},
+		{in: "EXTRA_HIGH", want: "xhigh"},
+		{in: "XHIGH", want: "xhigh"},
+		{in: "MAX", want: "max"},
+		{in: "unknown", want: ""},
+	} {
+		got := requestReasoningEffort(platform.QueryRequest{Model: &platform.ModelOptions{ReasoningEffort: tc.in}})
+		if got != tc.want {
+			t.Fatalf("reasoning effort %q = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestBackendArgsWithModelOptions(t *testing.T) {
+	base := []string{config.ClaudeBackendModeArg, "-claude", "claude"}
+	got := backendArgsWithModelOptions(base, claudeModelOptions{model: "claude-sonnet-4-6", reasoningEffort: "high"})
+	want := []string{config.ClaudeBackendModeArg, "-claude", "claude", "-model", "claude-sonnet-4-6", "-effort", "high"}
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("args = %#v, want %#v", got, want)
+	}
+	if got := backendArgsWithModelOptions(base, claudeModelOptions{}); strings.Join(got, "\x00") != strings.Join(base, "\x00") {
+		t.Fatalf("args without model options = %#v, want %#v", got, base)
+	}
+}
+
 func TestManagerSubmitResolvesACPPermission(t *testing.T) {
 	m := NewManager(testConfig(t))
 	defer m.Close()

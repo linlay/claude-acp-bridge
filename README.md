@@ -56,6 +56,7 @@ make test
 - `PROXY_ACP_AUTH_TOKEN` defaults to empty, which leaves API routes unauthenticated. When set, clients must send `Authorization: Bearer <token>` or `?token=<token>`. For `agent-platform` PROXY agents, configure `proxyConfig.token` or `proxyConfig.tokenEnv` only when this token is set upstream.
 - `CLAUDE_CODE_CLI` defaults to `claude` and may be an absolute path.
 - `CLAUDE_CODE_ARGS` defaults to empty and accepts shell-style argument splitting, for example `CLAUDE_CODE_ARGS="--permission-mode dontAsk"`.
+- When the platform sends `model.modelId` or `model.key`, this service appends `--model <model>` for that Claude Code CLI session. When the platform sends `model.reasoningEffort` as `LOW`, `MEDIUM`, `HIGH`, `EXTRA_HIGH`, or `MAX`, this service appends `--effort <low|medium|high|xhigh|max>`.
 - `http_proxy`, `HTTP_PROXY`, `https_proxy`, and `HTTPS_PROXY` default to empty. When set in the dotenv file or process environment, non-empty values are passed to the Claude Code CLI backend.
 - `PROXY_ACP_IDLE_TIMEOUT_MS` defaults to `1800000`.
 - `agent-platform` PROXY request timeout defaults to `300000ms`; `proxyConfig.timeoutMs` is only needed when overriding that default.

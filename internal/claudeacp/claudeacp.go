@@ -101,14 +101,17 @@ func Run(args []string) error {
 	flags := flag.NewFlagSet("claude-cli-acp", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	claudeCommand := flags.String("claude", "claude", "Claude Code CLI command")
+	model := flags.String("model", "", "Claude model override")
+	effort := flags.String("effort", "", "Claude effort override")
 	flags.Var(&extra, "arg", "Extra argument passed to Claude Code CLI, repeatable")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
+	claudeArgs := applyClaudeModelArgs(extra, *model, *effort)
 
 	a := &agent{
 		claudeCommand: *claudeCommand,
-		claudeArgs:    extra,
+		claudeArgs:    claudeArgs,
 		sessions:      map[acp.SessionId]string{},
 		active:        map[acp.SessionId]*exec.Cmd{},
 	}
@@ -121,6 +124,17 @@ func Run(args []string) error {
 
 func (a *agent) Initialize(context.Context, acp.InitializeRequest) (acp.InitializeResponse, error) {
 	return acp.InitializeResponse{ProtocolVersion: acp.ProtocolVersionNumber}, nil
+}
+
+func applyClaudeModelArgs(base []string, model string, effort string) []string {
+	args := append([]string(nil), base...)
+	if model = strings.TrimSpace(model); model != "" {
+		args = append(args, "--model", model)
+	}
+	if effort = strings.TrimSpace(effort); effort != "" {
+		args = append(args, "--effort", effort)
+	}
+	return args
 }
 
 func (a *agent) NewSession(_ context.Context, params acp.NewSessionRequest) (acp.NewSessionResponse, error) {
