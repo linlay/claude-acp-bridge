@@ -31,6 +31,7 @@ type Manager struct {
 	sessions map[string]*backendSession
 	awaiting map[string]*pendingPermission
 	runs     map[string]*backendSession
+	access   map[string]string
 }
 
 func NewManager(cfg config.Config) *Manager {
@@ -39,6 +40,7 @@ func NewManager(cfg config.Config) *Manager {
 		sessions: map[string]*backendSession{},
 		awaiting: map[string]*pendingPermission{},
 		runs:     map[string]*backendSession{},
+		access:   map[string]string{},
 	}
 }
 
@@ -51,6 +53,7 @@ func (m *Manager) Close() {
 	m.sessions = map[string]*backendSession{}
 	m.runs = map[string]*backendSession{}
 	m.awaiting = map[string]*pendingPermission{}
+	m.access = map[string]string{}
 	m.mu.Unlock()
 
 	for _, sess := range sessions {
@@ -70,7 +73,13 @@ func (m *Manager) Execute(ctx context.Context, req platform.QueryRequest, sink E
 
 	turn := newTurn(req, sink, m)
 	m.registerRun(req.RunID, sess)
-	defer m.unregisterRun(req.RunID)
+	if model.accessLevel != "" {
+		m.setRunAccess(req.RunID, model.accessLevel)
+	}
+	defer func() {
+		m.unregisterRun(req.RunID)
+		m.clearRunAccess(req.RunID)
+	}()
 
 	return sess.prompt(ctx, req, turn)
 }
@@ -87,6 +96,36 @@ func (m *Manager) Submit(req platform.SubmitRequest) (platform.SubmitResponse, b
 			AwaitingID: req.AwaitingID,
 			Detail:     "No active ACP permission request matched this submit",
 		}, false
+	}
+
+	if pending.mode == "plan" {
+		decision := planDecisionFromSubmit(req.Params)
+		select {
+		case pending.planReply <- decision:
+			return platform.SubmitResponse{
+				Accepted:   true,
+				Status:     "accepted",
+				RunID:      req.RunID,
+				AwaitingID: req.AwaitingID,
+				Detail:     "ACP plan response forwarded",
+			}, true
+		case <-pending.done:
+			return platform.SubmitResponse{
+				Accepted:   false,
+				Status:     "stale",
+				RunID:      req.RunID,
+				AwaitingID: req.AwaitingID,
+				Detail:     "ACP plan request already completed",
+			}, true
+		case <-time.After(2 * time.Second):
+			return platform.SubmitResponse{
+				Accepted:   false,
+				Status:     "timeout",
+				RunID:      req.RunID,
+				AwaitingID: req.AwaitingID,
+				Detail:     "Timed out forwarding ACP plan response",
+			}, true
+		}
 	}
 
 	outcome := permissionOutcomeFromSubmit(req.Params, pending.options)
@@ -119,6 +158,63 @@ func (m *Manager) Submit(req platform.SubmitRequest) (platform.SubmitResponse, b
 			Detail:     "Timed out forwarding ACP permission response",
 		}, true
 	}
+}
+
+func (m *Manager) UpdateAccessLevel(req platform.AccessLevelRequest) (platform.AccessLevelResponse, bool) {
+	accessLevel := normalizeAccessLevel(req.AccessLevel)
+	if accessLevel == "" {
+		return platform.AccessLevelResponse{
+			Accepted:    false,
+			Status:      "invalid",
+			RunID:       req.RunID,
+			AccessLevel: req.AccessLevel,
+			Detail:      "accessLevel must be default, auto_approve, or full_access",
+		}, false
+	}
+
+	m.mu.Lock()
+	if m.runs[req.RunID] == nil {
+		m.mu.Unlock()
+		return platform.AccessLevelResponse{
+			Accepted:    false,
+			Status:      "unmatched",
+			RunID:       req.RunID,
+			AccessLevel: accessLevel,
+			Detail:      "No active ACP run matched access level update",
+		}, false
+	}
+	previous := m.access[req.RunID]
+	if previous == "" {
+		previous = "default"
+	}
+	m.access[req.RunID] = accessLevel
+	var pending []*pendingPermission
+	if accessLevelAllowsAutoApproval(accessLevel) {
+		for _, item := range m.awaiting {
+			if item.runID == req.RunID && item.mode == "approval" {
+				pending = append(pending, item)
+			}
+		}
+	}
+	m.mu.Unlock()
+
+	for _, item := range pending {
+		outcome := permissionOutcomeFromAccessLevel(accessLevel, item.options)
+		select {
+		case item.response <- outcome:
+		case <-item.done:
+		default:
+		}
+	}
+
+	return platform.AccessLevelResponse{
+		Accepted:            true,
+		Status:              "updated",
+		RunID:               req.RunID,
+		PreviousAccessLevel: previous,
+		AccessLevel:         accessLevel,
+		Detail:              "accessLevel updated",
+	}, true
 }
 
 func (m *Manager) Steer(req platform.SteerRequest) platform.SteerResponse {
@@ -175,6 +271,29 @@ func (m *Manager) unregisterRun(runID string) {
 	m.mu.Unlock()
 }
 
+func (m *Manager) setRunAccess(runID string, accessLevel string) {
+	runID = strings.TrimSpace(runID)
+	accessLevel = normalizeAccessLevel(accessLevel)
+	if runID == "" || accessLevel == "" {
+		return
+	}
+	m.mu.Lock()
+	m.access[runID] = accessLevel
+	m.mu.Unlock()
+}
+
+func (m *Manager) clearRunAccess(runID string) {
+	m.mu.Lock()
+	delete(m.access, runID)
+	m.mu.Unlock()
+}
+
+func (m *Manager) runAccessLevel(runID string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return normalizeAccessLevel(m.access[runID])
+}
+
 func normalizeSteerID(steerID string) string {
 	if strings.TrimSpace(steerID) != "" {
 		return strings.TrimSpace(steerID)
@@ -182,7 +301,7 @@ func normalizeSteerID(steerID string) string {
 	return time.Now().UTC().Format("20060102150405.000000000")
 }
 
-func (m *Manager) resolveBackend(req platform.QueryRequest) (config.BackendConfig, string, claudeModelOptions, error) {
+func (m *Manager) resolveBackend(req platform.QueryRequest) (config.BackendConfig, string, claudeSessionOptions, error) {
 	key := stringParam(req.Params, "backend")
 	if key == "" {
 		key = strings.TrimSpace(req.AgentKey)
@@ -192,34 +311,47 @@ func (m *Manager) resolveBackend(req platform.QueryRequest) (config.BackendConfi
 		backend, ok = m.cfg.Backend("")
 	}
 	if !ok {
-		return config.BackendConfig{}, "", claudeModelOptions{}, fmt.Errorf("backend %q not configured", key)
+		return config.BackendConfig{}, "", claudeSessionOptions{}, fmt.Errorf("backend %q not configured", key)
 	}
 	cwd := stringParam(req.Params, "cwd")
 	if cwd == "" {
-		return config.BackendConfig{}, "", claudeModelOptions{}, fmt.Errorf("params.cwd is required; agent-platform must provide the ACP session working directory")
+		return config.BackendConfig{}, "", claudeSessionOptions{}, fmt.Errorf("params.cwd is required; agent-platform must provide the ACP session working directory")
 	}
 	abs, err := filepath.Abs(cwd)
 	if err != nil {
-		return config.BackendConfig{}, "", claudeModelOptions{}, err
+		return config.BackendConfig{}, "", claudeSessionOptions{}, err
 	}
-	return backend, abs, requestClaudeModelOptions(req), nil
+	return backend, abs, requestClaudeSessionOptions(req), nil
 }
 
-type claudeModelOptions struct {
-	model           string
-	reasoningEffort string
+type claudeSessionOptions struct {
+	model                      string
+	reasoningEffort            string
+	accessLevel                string
+	permissionMode             string
+	dangerouslySkipPermissions bool
 }
 
-func requestClaudeModelOptions(req platform.QueryRequest) claudeModelOptions {
-	return claudeModelOptions{
+func requestClaudeSessionOptions(req platform.QueryRequest) claudeSessionOptions {
+	opts := claudeSessionOptions{
 		model:           requestModel(req),
 		reasoningEffort: requestReasoningEffort(req),
 	}
+	opts.accessLevel = requestAccessLevel(req)
+	opts.permissionMode, opts.dangerouslySkipPermissions = claudeAccessPolicy(opts.accessLevel)
+	if mode := normalizeClaudePermissionMode(stringParam(req.Params, "permissionMode")); mode != "" {
+		opts.permissionMode = mode
+	}
+	return opts
 }
 
 func requestModel(req platform.QueryRequest) string {
 	if req.Model == nil {
-		return ""
+		return strings.TrimSpace(firstNonBlank(
+			stringParam(req.Params, "modelId"),
+			stringParam(req.Params, "modelKey"),
+			stringParam(req.Params, "model"),
+		))
 	}
 	if modelID := strings.TrimSpace(req.Model.ModelID); modelID != "" {
 		return modelID
@@ -229,9 +361,13 @@ func requestModel(req platform.QueryRequest) string {
 
 func requestReasoningEffort(req platform.QueryRequest) string {
 	if req.Model == nil {
-		return ""
+		return normalizeReasoningEffort(stringParam(req.Params, "reasoningEffort"))
 	}
-	switch strings.ToUpper(strings.TrimSpace(req.Model.ReasoningEffort)) {
+	return normalizeReasoningEffort(req.Model.ReasoningEffort)
+}
+
+func normalizeReasoningEffort(value string) string {
+	switch strings.ToUpper(strings.TrimSpace(value)) {
 	case "LOW":
 		return "low"
 	case "MEDIUM":
@@ -242,27 +378,128 @@ func requestReasoningEffort(req platform.QueryRequest) string {
 		return "xhigh"
 	case "MAX":
 		return "max"
+	case "NONE":
+		return ""
 	default:
 		return ""
 	}
 }
 
-func backendArgsWithModelOptions(base []string, opts claudeModelOptions) []string {
+func requestAccessLevel(req platform.QueryRequest) string {
+	accessLevel := strings.TrimSpace(req.AccessLevel)
+	if accessLevel == "" {
+		accessLevel = stringParam(req.Params, "accessLevel")
+	}
+	return normalizeAccessLevel(accessLevel)
+}
+
+func normalizeAccessLevel(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "":
+		return ""
+	case "default":
+		return "default"
+	case "auto_approve", "auto-approve", "autoapprove", "full_auto", "full-auto":
+		return "auto_approve"
+	case "full_access", "full-access", "fullaccess", "danger_full_access", "danger-full-access":
+		return "full_access"
+	default:
+		return ""
+	}
+}
+
+func claudeAccessPolicy(accessLevel string) (string, bool) {
+	switch normalizeAccessLevel(accessLevel) {
+	case "default":
+		return "default", false
+	case "auto_approve":
+		return "auto", false
+	case "full_access":
+		return "bypassPermissions", true
+	default:
+		return "", false
+	}
+}
+
+func normalizeClaudePermissionMode(value string) string {
+	switch strings.TrimSpace(value) {
+	case "acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "plan":
+		return strings.TrimSpace(value)
+	default:
+		return ""
+	}
+}
+
+func accessLevelAllowsAutoApproval(accessLevel string) bool {
+	switch normalizeAccessLevel(accessLevel) {
+	case "auto_approve", "full_access":
+		return true
+	default:
+		return false
+	}
+}
+
+func permissionOutcomeFromAccessLevel(accessLevel string, options []acp.PermissionOption) acp.RequestPermissionOutcome {
+	switch normalizeAccessLevel(accessLevel) {
+	case "":
+		return acp.RequestPermissionOutcome{Cancelled: &acp.RequestPermissionOutcomeCancelled{}}
+	case "full_access":
+		if id := permissionOptionIDByPrefix(options, "decision_json:"); id != "" {
+			return acp.RequestPermissionOutcome{Selected: &acp.RequestPermissionOutcomeSelected{OptionId: acp.PermissionOptionId(id)}}
+		}
+		return permissionOutcomeFromSubmit([]map[string]any{{"decision": "approve"}}, options)
+	case "auto_approve":
+		return permissionOutcomeFromSubmit([]map[string]any{{"decision": "approve_rule_run"}}, options)
+	default:
+		return acp.RequestPermissionOutcome{Cancelled: &acp.RequestPermissionOutcomeCancelled{}}
+	}
+}
+
+func permissionOptionIDByPrefix(options []acp.PermissionOption, prefix string) string {
+	for _, option := range options {
+		if strings.HasPrefix(string(option.OptionId), prefix) {
+			return string(option.OptionId)
+		}
+	}
+	return ""
+}
+
+func backendArgsWithModel(base []string, model string) []string {
+	return backendArgsWithSessionOptions(base, claudeSessionOptions{model: model})
+}
+
+func backendArgsWithModelOptions(base []string, opts claudeSessionOptions) []string {
+	return backendArgsWithSessionOptions(base, opts)
+}
+
+func backendArgsWithSessionOptions(base []string, opts claudeSessionOptions) []string {
 	args := append([]string(nil), base...)
-	if model := strings.TrimSpace(opts.model); model != "" {
+	model := strings.TrimSpace(opts.model)
+	if model == "" {
+		if strings.TrimSpace(opts.reasoningEffort) == "" && strings.TrimSpace(opts.permissionMode) == "" && !opts.dangerouslySkipPermissions {
+			return args
+		}
+	} else {
 		args = append(args, "-model", model)
 	}
-	if reasoningEffort := strings.TrimSpace(opts.reasoningEffort); reasoningEffort != "" {
+	reasoningEffort := strings.TrimSpace(opts.reasoningEffort)
+	if reasoningEffort != "" {
 		args = append(args, "-effort", reasoningEffort)
+	}
+	if permissionMode := strings.TrimSpace(opts.permissionMode); permissionMode != "" {
+		args = append(args, "-permission-mode", permissionMode)
+	}
+	if opts.dangerouslySkipPermissions {
+		args = append(args, "-dangerously-skip-permissions")
 	}
 	return args
 }
 
-func (m *Manager) session(ctx context.Context, backend config.BackendConfig, chatID string, cwd string, model claudeModelOptions) (*backendSession, error) {
+func (m *Manager) session(ctx context.Context, backend config.BackendConfig, chatID string, cwd string, opts claudeSessionOptions) (*backendSession, error) {
 	if strings.TrimSpace(chatID) == "" {
 		chatID = "default"
 	}
-	key := backend.Key + "\x00" + chatID + "\x00" + cwd + "\x00" + model.model + "\x00" + model.reasoningEffort
+	key := backend.Key + "\x00" + chatID + "\x00" + cwd + "\x00" + opts.model + "\x00" + opts.reasoningEffort + "\x00" + opts.permissionMode + "\x00" + fmt.Sprint(opts.dangerouslySkipPermissions)
 
 	m.mu.Lock()
 	if existing := m.sessions[key]; existing != nil && existing.alive() {
@@ -271,7 +508,7 @@ func (m *Manager) session(ctx context.Context, backend config.BackendConfig, cha
 	}
 	m.mu.Unlock()
 
-	sess, err := startBackendSession(ctx, backend, chatID, cwd, model)
+	sess, err := startBackendSession(ctx, backend, chatID, cwd, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -298,7 +535,7 @@ type backendSession struct {
 	cfg       config.BackendConfig
 	chatID    string
 	cwd       string
-	model     claudeModelOptions
+	options   claudeSessionOptions
 	sessionID acp.SessionId
 	cmd       *exec.Cmd
 	conn      *acp.ClientSideConnection
@@ -311,15 +548,16 @@ type backendSession struct {
 	closed   bool
 }
 
-func startBackendSession(ctx context.Context, cfg config.BackendConfig, chatID string, cwd string, model claudeModelOptions) (*backendSession, error) {
+func startBackendSession(ctx context.Context, cfg config.BackendConfig, chatID string, cwd string, opts claudeSessionOptions) (*backendSession, error) {
 	command, err := backendCommandPath(cfg.Command)
 	if err != nil {
 		return nil, err
 	}
-	cmd := exec.CommandContext(context.Background(), command, backendArgsWithModelOptions(cfg.Args, model)...)
+	cmd := exec.CommandContext(context.Background(), command, backendArgsWithSessionOptions(cfg.Args, opts)...)
 	cmd.Dir = cwd
 	cmd.Env = mergeEnv(os.Environ(), cfg.Env)
 	cmd.Stderr = os.Stderr
+	prepareChildProcess(cmd)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -332,7 +570,7 @@ func startBackendSession(ctx context.Context, cfg config.BackendConfig, chatID s
 		return nil, err
 	}
 
-	sess := &backendSession{cfg: cfg, chatID: chatID, cwd: cwd, model: model, cmd: cmd}
+	sess := &backendSession{cfg: cfg, chatID: chatID, cwd: cwd, options: opts, cmd: cmd}
 	client := &bridgeClient{session: sess, terminals: map[string]*terminalProcess{}}
 	conn := acp.NewClientSideConnection(client, stdin, stdout)
 	conn.SetLogger(slog.Default())
@@ -411,18 +649,23 @@ func (s *backendSession) prompt(ctx context.Context, req platform.QueryRequest, 
 		s.mu.Unlock()
 	}()
 
-	t.emit("request.query", map[string]any{
-		"requestId":  req.RequestID,
-		"runId":      req.RunID,
-		"chatId":     req.ChatID,
-		"agentKey":   req.AgentKey,
-		"role":       req.Role,
-		"message":    req.Message,
-		"references": req.References,
-		"params":     req.Params,
-		"model":      req.Model,
-		"scene":      req.Scene,
-	})
+	queryPayload := map[string]any{
+		"requestId":   req.RequestID,
+		"runId":       req.RunID,
+		"chatId":      req.ChatID,
+		"agentKey":    req.AgentKey,
+		"role":        req.Role,
+		"message":     req.Message,
+		"references":  req.References,
+		"params":      req.Params,
+		"accessLevel": req.AccessLevel,
+		"model":       req.Model,
+		"scene":       req.Scene,
+	}
+	if req.PlanningMode != nil {
+		queryPayload["planningMode"] = *req.PlanningMode
+	}
+	t.emit("request.query", queryPayload)
 	t.emit("run.start", map[string]any{"runId": req.RunID, "chatId": req.ChatID, "agentKey": req.AgentKey})
 
 	prompt, err := promptBlocks(req)
@@ -431,7 +674,8 @@ func (s *backendSession) prompt(ctx context.Context, req platform.QueryRequest, 
 		return err
 	}
 
-	resp, err := s.conn.Prompt(ctx, acp.PromptRequest{SessionId: s.sessionID, Prompt: prompt})
+	currentReq := req
+	resp, err := s.conn.Prompt(ctx, acp.PromptRequest{SessionId: s.sessionID, Prompt: prompt, Meta: promptRequestMeta(currentReq)})
 	for {
 		t.closeOpenStreams()
 		if err != nil {
@@ -441,15 +685,39 @@ func (s *backendSession) prompt(ctx context.Context, req platform.QueryRequest, 
 		if resp.StopReason == acp.StopReasonCancelled {
 			break
 		}
+		if planningModeEnabled(currentReq) {
+			if planningID, planText, ok := t.pendingPlanApproval(); ok {
+				decision, accepted := t.requestPlanApproval(ctx, planningID, planText)
+				if !accepted {
+					break
+				}
+				steerReq := planContinuationRequest(currentReq, decision, planText)
+				t.emit("request.steer", map[string]any{
+					"requestId": steerReq.RequestID,
+					"chatId":    steerReq.ChatID,
+					"runId":     t.req.RunID,
+					"steerId":   stableID(t.req.RunID, "plan_"+planningID+"_"+decision.Decision),
+					"message":   steerReq.Message,
+				})
+				prompt, err = promptBlocks(steerReq)
+				if err != nil {
+					t.emitRunError(err)
+					return err
+				}
+				currentReq = steerReq
+				resp, err = s.conn.Prompt(ctx, acp.PromptRequest{SessionId: s.sessionID, Prompt: prompt, Meta: promptRequestMeta(currentReq)})
+				continue
+			}
+		}
 		steer, ok := t.nextSteer()
 		if !ok {
 			break
 		}
-		steerReq := req
+		steerReq := currentReq
 		steerReq.RequestID = steer.RequestID
-		steerReq.ChatID = firstNonBlank(steer.ChatID, req.ChatID)
-		steerReq.AgentKey = firstNonBlank(steer.AgentKey, req.AgentKey)
-		steerReq.TeamID = firstNonBlank(steer.TeamID, req.TeamID)
+		steerReq.ChatID = firstNonBlank(steer.ChatID, currentReq.ChatID, req.ChatID)
+		steerReq.AgentKey = firstNonBlank(steer.AgentKey, currentReq.AgentKey, req.AgentKey)
+		steerReq.TeamID = firstNonBlank(steer.TeamID, currentReq.TeamID, req.TeamID)
 		steerReq.Message = steer.Message
 		steerReq.References = nil
 		prompt, err = promptBlocks(steerReq)
@@ -457,7 +725,8 @@ func (s *backendSession) prompt(ctx context.Context, req platform.QueryRequest, 
 			t.emitRunError(err)
 			return err
 		}
-		resp, err = s.conn.Prompt(ctx, acp.PromptRequest{SessionId: s.sessionID, Prompt: prompt})
+		currentReq = steerReq
+		resp, err = s.conn.Prompt(ctx, acp.PromptRequest{SessionId: s.sessionID, Prompt: prompt, Meta: promptRequestMeta(currentReq)})
 	}
 
 	switch resp.StopReason {
@@ -467,6 +736,37 @@ func (s *backendSession) prompt(ctx context.Context, req platform.QueryRequest, 
 		t.emit("run.complete", map[string]any{"runId": req.RunID, "finishReason": string(resp.StopReason), "usage": usagePayload(resp.Usage)})
 	}
 	return nil
+}
+
+func promptRequestMeta(req platform.QueryRequest) map[string]any {
+	if req.PlanningMode == nil {
+		return nil
+	}
+	return map[string]any{platform.PromptMetaPlanningMode: *req.PlanningMode}
+}
+
+func planningModeEnabled(req platform.QueryRequest) bool {
+	return req.PlanningMode != nil && *req.PlanningMode
+}
+
+func planContinuationRequest(base platform.QueryRequest, decision planDecision, planText string) platform.QueryRequest {
+	next := base
+	next.RequestID = stableID(base.RunID, "plan_"+decision.Decision+"_"+time.Now().UTC().Format("20060102150405.000000000"))
+	next.References = nil
+	if decision.Decision == "approve" {
+		disabled := false
+		next.PlanningMode = &disabled
+		next.Message = fmt.Sprintf("用户已经批准计划。请基于已确认计划继续执行，不要再次请求确认。\n\n已确认计划：\n%s", strings.TrimSpace(planText))
+		return next
+	}
+	enabled := true
+	next.PlanningMode = &enabled
+	reason := strings.TrimSpace(decision.Reason)
+	if reason == "" {
+		reason = "未提供具体修改意见。"
+	}
+	next.Message = fmt.Sprintf("用户已经拒绝计划。请根据反馈修订方案或给出下一步，不要执行被拒绝的计划。\n\n反馈：%s\n\n被拒绝的计划：\n%s", reason, strings.TrimSpace(planText))
+	return next
 }
 
 func (s *backendSession) cancel(ctx context.Context) error {
@@ -515,9 +815,7 @@ func (s *backendSession) Close() {
 	if s.client != nil {
 		s.client.closeTerminals()
 	}
-	if cmd != nil && cmd.Process != nil {
-		_ = cmd.Process.Kill()
-	}
+	_ = terminateChildProcess(cmd)
 }
 
 func (s *backendSession) isClosed() bool {
@@ -580,9 +878,12 @@ func (c *bridgeClient) WriteTextFile(_ context.Context, params acp.WriteTextFile
 	return acp.WriteTextFileResponse{}, nil
 }
 
-func (c *bridgeClient) CreateTerminal(_ context.Context, params acp.CreateTerminalRequest) (acp.CreateTerminalResponse, error) {
+func (c *bridgeClient) CreateTerminal(ctx context.Context, params acp.CreateTerminalRequest) (acp.CreateTerminalResponse, error) {
 	if !c.session.cfg.Capabilities.TerminalEnabled() {
 		return acp.CreateTerminalResponse{}, fmt.Errorf("backend %q is not allowed to create terminals", c.session.cfg.Key)
+	}
+	if err := c.requestTerminalApproval(ctx, params); err != nil {
+		return acp.CreateTerminalResponse{}, err
 	}
 	term, err := startTerminalProcess(c.session, params)
 	if err != nil {
@@ -595,6 +896,38 @@ func (c *bridgeClient) CreateTerminal(_ context.Context, params acp.CreateTermin
 	c.terminals[term.id] = term
 	c.terminalMu.Unlock()
 	return acp.CreateTerminalResponse{TerminalId: term.id}, nil
+}
+
+func (c *bridgeClient) requestTerminalApproval(ctx context.Context, params acp.CreateTerminalRequest) error {
+	t := c.session.activeTurn()
+	if t == nil {
+		return fmt.Errorf("terminal request without active turn")
+	}
+	kind := acp.ToolKindExecute
+	status := acp.ToolCallStatusPending
+	command := terminalCommandText(params)
+	title := "Run command: " + command
+	resp, err := t.requestPermission(ctx, acp.RequestPermissionRequest{
+		SessionId: c.session.sessionID,
+		ToolCall: acp.ToolCallUpdate{
+			ToolCallId: nextTerminalApprovalID(),
+			Title:      &title,
+			Kind:       &kind,
+			Status:     &status,
+			RawInput:   terminalRawInput(c.session, params),
+		},
+		Options: []acp.PermissionOption{
+			{OptionId: "allow", Name: "Allow", Kind: acp.PermissionOptionKindAllowOnce},
+			{OptionId: "reject", Name: "Reject", Kind: acp.PermissionOptionKindRejectOnce},
+		},
+	})
+	if err != nil {
+		return err
+	}
+	if resp.Outcome.Selected != nil && resp.Outcome.Selected.OptionId == "allow" {
+		return nil
+	}
+	return fmt.Errorf("terminal command rejected by user")
 }
 
 func (c *bridgeClient) KillTerminal(_ context.Context, params acp.KillTerminalRequest) (acp.KillTerminalResponse, error) {

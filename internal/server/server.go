@@ -18,9 +18,12 @@ import (
 )
 
 type Server struct {
-	cfg     config.Config
-	manager *acpbridge.Manager
-	mux     *http.ServeMux
+	cfg              config.Config
+	manager          *acpbridge.Manager
+	mux              *http.ServeMux
+	modelsMu         sync.Mutex
+	modelsCache      platform.ModelCatalogResponse
+	modelsCacheUntil time.Time
 }
 
 func New(cfg config.Config, manager *acpbridge.Manager) http.Handler {
@@ -35,8 +38,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("/healthz", s.handleHealthz)
+	s.mux.HandleFunc("/api/models", s.withAuth(http.MethodGet, s.handleModels))
 	s.mux.HandleFunc("/api/query", s.withAuth(http.MethodPost, s.handleQuery))
 	s.mux.HandleFunc("/api/submit", s.withAuth(http.MethodPost, s.handleSubmit))
+	s.mux.HandleFunc("/api/access-level", s.withAuth(http.MethodPost, s.handleAccessLevel))
 	s.mux.HandleFunc("/api/steer", s.withAuth(http.MethodPost, s.handleSteer))
 	s.mux.HandleFunc("/api/interrupt", s.withAuth(http.MethodPost, s.handleInterrupt))
 	s.mux.HandleFunc("/ws", s.handleWS)
@@ -105,6 +110,16 @@ func (s *Server) handleSubmit(w http.ResponseWriter, r *http.Request) {
 	platform.WriteJSON(w, http.StatusOK, platform.Success(resp))
 }
 
+func (s *Server) handleAccessLevel(w http.ResponseWriter, r *http.Request) {
+	var req platform.AccessLevelRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.RunID) == "" || strings.TrimSpace(req.AccessLevel) == "" {
+		platform.WriteJSON(w, http.StatusBadRequest, platform.Failure(http.StatusBadRequest, "runId and accessLevel are required"))
+		return
+	}
+	resp, _ := s.manager.UpdateAccessLevel(req)
+	platform.WriteJSON(w, http.StatusOK, platform.Success(resp))
+}
+
 func (s *Server) handleSteer(w http.ResponseWriter, r *http.Request) {
 	var req platform.SteerRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.RunID) == "" || strings.TrimSpace(req.Message) == "" {
@@ -156,6 +171,8 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			go s.wsQuery(connCtx, conn, frame)
 		case "request.submit", "/api/submit":
 			s.wsSubmit(conn, frame)
+		case "request.access-level", "/api/access-level":
+			s.wsAccessLevel(conn, frame)
 		case "request.steer", "/api/steer":
 			s.wsSteer(conn, frame)
 		case "request.interrupt", "/api/interrupt":
@@ -189,6 +206,16 @@ func (s *Server) wsSubmit(conn *websocket.Conn, frame requestFrame) {
 		return
 	}
 	resp, _ := s.manager.Submit(req)
+	writeWS(conn, responseFrame{Frame: "response", Type: frame.Type, ID: frame.ID, Code: 0, Msg: "success", Data: resp})
+}
+
+func (s *Server) wsAccessLevel(conn *websocket.Conn, frame requestFrame) {
+	req, err := platform.DecodeJSON[platform.AccessLevelRequest](frame.Payload)
+	if err != nil || strings.TrimSpace(req.RunID) == "" || strings.TrimSpace(req.AccessLevel) == "" {
+		writeWS(conn, errorFrame{Frame: "error", ID: frame.ID, Type: "invalid_request", Code: 400, Msg: "invalid access-level payload"})
+		return
+	}
+	resp, _ := s.manager.UpdateAccessLevel(req)
 	writeWS(conn, responseFrame{Frame: "response", Type: frame.Type, ID: frame.ID, Code: 0, Msg: "success", Data: resp})
 }
 

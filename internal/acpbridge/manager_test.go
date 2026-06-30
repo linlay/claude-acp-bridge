@@ -72,6 +72,51 @@ func TestBackendCommandPathLeavesPathLookupCommands(t *testing.T) {
 	}
 }
 
+func TestNormalizedUsageSnapshotPayloadPreservesBoardDetails(t *testing.T) {
+	payload := normalizedUsageSnapshotPayload(map[string]any{
+		"model": map[string]any{"key": "MiniMax-M2.7"},
+		"contextWindow": map[string]any{
+			"maxSize":         200000,
+			"currentSize":     "190",
+			"reasoningEffort": "MEDIUM",
+		},
+		"usage": map[string]any{
+			"current": map[string]any{
+				"promptTokens":           190,
+				"completionTokens":       30,
+				"totalTokens":            220,
+				"llmChatCompletionCount": 1,
+				"toolCallCount":          0,
+				"estimatedCost": map[string]any{
+					"currency": "USD",
+					"total":    0.123,
+				},
+				"timing": map[string]any{
+					"firstTokenLatencyMs":  345,
+					"generationDurationMs": 678,
+				},
+			},
+		},
+	})
+	usage := payload["usage"].(map[string]any)
+	current := usage["current"].(map[string]any)
+	if current["toolCallCount"] != 0 {
+		t.Fatalf("tool count = %#v", current["toolCallCount"])
+	}
+	estimatedCost := current["estimatedCost"].(map[string]any)
+	if estimatedCost["currency"] != "USD" || estimatedCost["total"] != 0.123 {
+		t.Fatalf("estimated cost = %#v", estimatedCost)
+	}
+	timing := current["timing"].(map[string]any)
+	if timing["firstTokenLatencyMs"] != 345 || timing["generationDurationMs"] != 678 {
+		t.Fatalf("timing = %#v", timing)
+	}
+	contextWindow := payload["contextWindow"].(map[string]any)
+	if contextWindow["currentSize"] != 190 || contextWindow["reasoningEffort"] != "MEDIUM" {
+		t.Fatalf("context window = %#v", contextWindow)
+	}
+}
+
 func TestManagerExecuteMapsACPUpdatesToPlatformEvents(t *testing.T) {
 	m := NewManager(testConfig(t))
 	defer m.Close()
@@ -164,13 +209,43 @@ func TestRequestReasoningEffortNormalizesPlatformValue(t *testing.T) {
 
 func TestBackendArgsWithModelOptions(t *testing.T) {
 	base := []string{config.ClaudeBackendModeArg, "-claude", "claude"}
-	got := backendArgsWithModelOptions(base, claudeModelOptions{model: "claude-sonnet-4-6", reasoningEffort: "high"})
+	got := backendArgsWithModelOptions(base, claudeSessionOptions{model: "claude-sonnet-4-6", reasoningEffort: "high"})
 	want := []string{config.ClaudeBackendModeArg, "-claude", "claude", "-model", "claude-sonnet-4-6", "-effort", "high"}
 	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
 		t.Fatalf("args = %#v, want %#v", got, want)
 	}
-	if got := backendArgsWithModelOptions(base, claudeModelOptions{}); strings.Join(got, "\x00") != strings.Join(base, "\x00") {
+	if got := backendArgsWithModelOptions(base, claudeSessionOptions{}); strings.Join(got, "\x00") != strings.Join(base, "\x00") {
 		t.Fatalf("args without model options = %#v, want %#v", got, base)
+	}
+}
+
+func TestBackendArgsWithAccessLevelOptions(t *testing.T) {
+	base := []string{config.ClaudeBackendModeArg, "-claude", "claude"}
+	got := backendArgsWithModelOptions(base, claudeSessionOptions{
+		model:                      "claude-opus-4-1",
+		permissionMode:             "bypassPermissions",
+		dangerouslySkipPermissions: true,
+	})
+	want := []string{config.ClaudeBackendModeArg, "-claude", "claude", "-model", "claude-opus-4-1", "-permission-mode", "bypassPermissions", "-dangerously-skip-permissions"}
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("args = %#v, want %#v", got, want)
+	}
+}
+
+func TestRequestClaudeSessionOptionsMapsAccessLevel(t *testing.T) {
+	got := requestClaudeSessionOptions(platform.QueryRequest{AccessLevel: "full_access"})
+	if got.accessLevel != "full_access" || got.permissionMode != "bypassPermissions" || !got.dangerouslySkipPermissions {
+		t.Fatalf("full_access options = %#v", got)
+	}
+
+	got = requestClaudeSessionOptions(platform.QueryRequest{Params: map[string]any{"accessLevel": "auto_approve"}})
+	if got.accessLevel != "auto_approve" || got.permissionMode != "auto" || got.dangerouslySkipPermissions {
+		t.Fatalf("auto_approve options = %#v", got)
+	}
+
+	got = requestClaudeSessionOptions(platform.QueryRequest{AccessLevel: "full_access", Params: map[string]any{"permissionMode": "acceptEdits"}})
+	if got.permissionMode != "acceptEdits" || !got.dangerouslySkipPermissions {
+		t.Fatalf("permission mode override options = %#v", got)
 	}
 }
 
@@ -221,6 +296,69 @@ func TestManagerSubmitResolvesACPPermission(t *testing.T) {
 	if !contains(eventTypes(sink.snapshot()), "awaiting.answer") {
 		t.Fatalf("expected awaiting.answer, got %#v", eventTypes(sink.snapshot()))
 	}
+}
+
+func TestManagerPlanningModeRequestsPlanApproval(t *testing.T) {
+	m := NewManager(testConfig(t))
+	defer m.Close()
+
+	enabled := true
+	sink := &recordingSink{}
+	done := make(chan error, 1)
+	go func() {
+		done <- m.Execute(context.Background(), platform.QueryRequest{
+			RequestID:    "req_plan",
+			RunID:        "run_plan",
+			ChatID:       "chat_plan",
+			AgentKey:     "fake",
+			Message:      "plan-hitl",
+			Params:       testParams(t),
+			PlanningMode: &enabled,
+		}, sink)
+	}()
+
+	var awaiting platform.EventData
+	for i := 0; i < 200; i++ {
+		for _, event := range sink.snapshot() {
+			if event.Type == "awaiting.ask" && event.Payload["mode"] == "plan" {
+				awaiting = event
+				break
+			}
+		}
+		if awaiting.Type != "" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if awaiting.Type == "" {
+		t.Fatalf("expected plan awaiting.ask, got %#v", eventTypes(sink.snapshot()))
+	}
+	awaitingID, _ := awaiting.Payload["awaitingId"].(string)
+	resp, ok := m.Submit(platform.SubmitRequest{
+		RunID:      "run_plan",
+		AwaitingID: awaitingID,
+		Params:     []map[string]any{{"decision": "approve"}},
+	})
+	if !ok || !resp.Accepted {
+		t.Fatalf("submit response = %#v ok=%v", resp, ok)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	events := sink.snapshot()
+	types := eventTypes(events)
+	for _, want := range []string{"planning.start", "planning.delta", "planning.end", "awaiting.ask", "request.submit", "awaiting.answer", "request.steer", "run.complete"} {
+		if !contains(types, want) {
+			t.Fatalf("missing %s, got %#v", want, types)
+		}
+	}
+	if !containsDelta(events, " planning-meta-false") {
+		t.Fatalf("approved plan should continue with planningMode=false, got %#v", events)
+	}
+	assertEventOrder(t, types, "planning.end", "awaiting.ask")
+	assertEventOrder(t, types, "awaiting.answer", "request.steer")
+	assertEventOrder(t, types, "request.steer", "run.complete")
 }
 
 func TestManagerSteerQueuesFollowUpPromptBeforeRunComplete(t *testing.T) {
@@ -447,7 +585,7 @@ func TestBridgeClientWriteTextFile(t *testing.T) {
 }
 
 func TestBridgeClientTerminalLifecycle(t *testing.T) {
-	client := testBridgeClient(t)
+	client := testBridgeClientWithActiveTurn(t, "full_access")
 	resp, err := client.CreateTerminal(context.Background(), acp.CreateTerminalRequest{
 		Command: "sh",
 		Args:    []string{"-c", "printf hello"},
@@ -475,7 +613,7 @@ func TestBridgeClientTerminalLifecycle(t *testing.T) {
 }
 
 func TestBridgeClientKillTerminal(t *testing.T) {
-	client := testBridgeClient(t)
+	client := testBridgeClientWithActiveTurn(t, "full_access")
 	resp, err := client.CreateTerminal(context.Background(), acp.CreateTerminalRequest{
 		Command: "sh",
 		Args:    []string{"-c", "sleep 5"},
@@ -498,7 +636,7 @@ func TestBridgeClientKillTerminal(t *testing.T) {
 }
 
 func TestBridgeClientTerminalOutputLimitPreservesUTF8(t *testing.T) {
-	client := testBridgeClient(t)
+	client := testBridgeClientWithActiveTurn(t, "full_access")
 	resp, err := client.CreateTerminal(context.Background(), acp.CreateTerminalRequest{
 		Command:         "sh",
 		Args:            []string{"-c", "printf '你好世界'"},
@@ -558,6 +696,29 @@ func testBridgeClient(t *testing.T) *bridgeClient {
 	cfg.Capabilities.Terminal = &terminal
 	sess := &backendSession{cfg: cfg, cwd: dir}
 	return &bridgeClient{session: sess, terminals: map[string]*terminalProcess{}}
+}
+
+func testBridgeClientWithActiveTurn(t *testing.T, accessLevel string) *bridgeClient {
+	t.Helper()
+	client := testBridgeClient(t)
+	m := NewManager(testConfig(t))
+	req := platform.QueryRequest{
+		RunID:    "run_terminal",
+		ChatID:   "chat_terminal",
+		AgentKey: "fake",
+		Params:   testParams(t),
+	}
+	m.setRunAccess(req.RunID, accessLevel)
+	client.session.mu.Lock()
+	client.session.active = newTurn(req, &recordingSink{}, m)
+	client.session.mu.Unlock()
+	t.Cleanup(func() {
+		client.session.mu.Lock()
+		client.session.active = nil
+		client.session.mu.Unlock()
+		m.Close()
+	})
+	return client
 }
 
 func testParams(t *testing.T) map[string]any {

@@ -12,6 +12,8 @@ import (
 	"sync"
 
 	"github.com/coder/acp-go-sdk"
+
+	"proxy-acp/internal/platform"
 )
 
 type agent struct {
@@ -59,6 +61,27 @@ func (a *agent) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Promp
 	}); err != nil {
 		return acp.PromptResponse{}, err
 	}
+	planningMode, hasPlanningMode := params.Meta[platform.PromptMetaPlanningMode].(bool)
+	if planningMode {
+		if err := a.conn.SessionUpdate(ctx, acp.SessionNotification{
+			SessionId: params.SessionId,
+			Update:    acp.UpdateAgentMessageText(" planning-meta-true"),
+		}); err != nil {
+			return acp.PromptResponse{}, err
+		}
+		if strings.Contains(promptText(params), "plan-hitl") {
+			if err := a.emitPlanning(ctx, params.SessionId, "plan_test", "Test implementation plan."); err != nil {
+				return acp.PromptResponse{}, err
+			}
+		}
+	} else if hasPlanningMode {
+		if err := a.conn.SessionUpdate(ctx, acp.SessionNotification{
+			SessionId: params.SessionId,
+			Update:    acp.UpdateAgentMessageText(" planning-meta-false"),
+		}); err != nil {
+			return acp.PromptResponse{}, err
+		}
+	}
 	if err := a.conn.SessionUpdate(ctx, acp.SessionNotification{
 		SessionId: params.SessionId,
 		Update: acp.StartToolCall(
@@ -79,6 +102,9 @@ func (a *agent) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Promp
 			acp.WithUpdateRawOutput(map[string]any{"ok": true}),
 		),
 	}); err != nil {
+		return acp.PromptResponse{}, err
+	}
+	if err := a.emitUsageSnapshot(ctx, params.SessionId); err != nil {
 		return acp.PromptResponse{}, err
 	}
 	if strings.Contains(promptText(params), "permission") {
@@ -145,6 +171,68 @@ func (a *agent) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Promp
 		}
 	}
 	return acp.PromptResponse{StopReason: acp.StopReasonEndTurn}, nil
+}
+
+func (a *agent) emitPlanning(ctx context.Context, sessionID acp.SessionId, planningID string, text string) error {
+	for _, item := range []struct {
+		eventType string
+		text      string
+	}{
+		{eventType: "planning.start"},
+		{eventType: "planning.delta", text: text},
+		{eventType: "planning.end"},
+	} {
+		if err := a.conn.SessionUpdate(ctx, acp.SessionNotification{
+			SessionId: sessionID,
+			Update: acp.SessionUpdate{AgentThoughtChunk: &acp.SessionUpdateAgentThoughtChunk{
+				Content:       acp.TextBlock(item.text),
+				Meta:          map[string]any{platform.ACPMetaEventType: item.eventType, platform.ACPMetaPlanningID: planningID},
+				SessionUpdate: "agent_thought_chunk",
+			}},
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (a *agent) emitUsageSnapshot(ctx context.Context, sessionID acp.SessionId) error {
+	return a.conn.SessionUpdate(ctx, acp.SessionNotification{
+		SessionId: sessionID,
+		Update: acp.SessionUpdate{AgentThoughtChunk: &acp.SessionUpdateAgentThoughtChunk{
+			Content: acp.TextBlock(""),
+			Meta: map[string]any{
+				platform.ACPMetaEventType: "usage.snapshot",
+				platform.ACPMetaUsageSnapshot: map[string]any{
+					"model": map[string]any{"key": "fake-model"},
+					"contextWindow": map[string]any{
+						"maxSize":         272000,
+						"currentSize":     16513,
+						"modelKey":        "fake-model",
+						"reasoningEffort": "medium",
+					},
+					"usage": map[string]any{
+						"current": map[string]any{
+							"modelKey":               "fake-model",
+							"reasoningEffort":        "medium",
+							"promptTokens":           16513,
+							"completionTokens":       52,
+							"totalTokens":            16565,
+							"llmChatCompletionCount": 1,
+							"promptTokensDetails": map[string]any{
+								"cacheHitTokens":  2432,
+								"cacheMissTokens": 14081,
+							},
+							"completionTokensDetails": map[string]any{
+								"reasoningTokens": 45,
+							},
+						},
+					},
+				},
+			},
+			SessionUpdate: "agent_thought_chunk",
+		}},
+	})
 }
 
 func (a *agent) Cancel(context.Context, acp.CancelNotification) error { return nil }

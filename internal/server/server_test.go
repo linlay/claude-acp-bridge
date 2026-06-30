@@ -104,15 +104,12 @@ func TestQuerySSEAndSubmit(t *testing.T) {
 		}
 	}
 	assertContentEventOrder(t, events, "run_http",
-		"content.start:run_http_c_1",
-		"content.end:run_http_c_1",
 		"awaiting.ask",
 		"request.submit",
 		"awaiting.answer",
-		"content.start:run_http_c_2",
-		"content.end:run_http_c_2",
 		"run.complete",
 	)
+	assertContentDeltaAfter(t, events, "awaiting.answer")
 }
 
 func TestQueryWebSocketSubmitAndSteer(t *testing.T) {
@@ -213,15 +210,84 @@ func TestQueryWebSocketSubmitAndSteer(t *testing.T) {
 		}
 	}
 	assertContentEventOrder(t, events, "run_ws",
-		"content.start:run_ws_c_1",
-		"content.end:run_ws_c_1",
 		"awaiting.ask",
 		"request.submit",
 		"awaiting.answer",
-		"content.start:run_ws_c_2",
-		"content.end:run_ws_c_2",
 		"run.complete",
 	)
+	assertContentDeltaAfter(t, events, "awaiting.answer")
+}
+
+func TestParseClaudeModelCatalogUsesRuntimeModel(t *testing.T) {
+	output := []byte(strings.Join([]string{
+		`not json`,
+		`{"type":"system","subtype":"init","model":"MiniMax-M2.7"}`,
+		`{"type":"assistant","message":{"model":"MiniMax-M2.7"}}`,
+		`{"type":"result","modelUsage":{"MiniMax-M2.7":{"contextWindow":200000,"maxOutputTokens":32000}}}`,
+	}, "\n"))
+
+	catalog, err := parseClaudeModelCatalog(output)
+	if err != nil {
+		t.Fatalf("parse catalog: %v", err)
+	}
+	if len(catalog.Models) != 1 {
+		t.Fatalf("models = %#v, want one runtime model", catalog.Models)
+	}
+	model := catalog.Models[0]
+	if model.Key != "MiniMax-M2.7" || model.Name != "MiniMax-M2.7" || model.ModelID != "MiniMax-M2.7" {
+		t.Fatalf("model identity = %#v", model)
+	}
+	if model.ContextWindow != 200000 {
+		t.Fatalf("context window = %d, want 200000", model.ContextWindow)
+	}
+	if !model.IsReasoner {
+		t.Fatalf("model should be marked as a reasoner: %#v", model)
+	}
+	if strings.Join(model.ReasoningEfforts, ",") != "LOW,MEDIUM,HIGH,XHIGH,MAX" {
+		t.Fatalf("model reasoning efforts = %#v", model.ReasoningEfforts)
+	}
+}
+
+func TestClaudeModelProbeCommandReusesBackendCLIArgs(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Backends[0].Command = config.SelfBackendCommand
+	cfg.Backends[0].Args = []string{
+		config.ClaudeBackendModeArg,
+		"-claude", "/opt/homebrew/bin/claude",
+		"-arg", "--permission-mode",
+		"-arg", "dontAsk",
+		"-model", "MiniMax-M2.7",
+		"-effort", "high",
+		"-dangerously-skip-permissions",
+	}
+	cfg.Backends[0].Env = map[string]string{"HTTPS_PROXY": "http://127.0.0.1:7890"}
+
+	command, baseArgs, env, err := claudeModelProbeCommand(cfg)
+	if err != nil {
+		t.Fatalf("probe command: %v", err)
+	}
+	if command != "/opt/homebrew/bin/claude" {
+		t.Fatalf("command = %q", command)
+	}
+	wantBase := []string{
+		"--permission-mode", "dontAsk",
+		"--model", "MiniMax-M2.7",
+		"--effort", "high",
+		"--dangerously-skip-permissions",
+	}
+	if strings.Join(baseArgs, "\x00") != strings.Join(wantBase, "\x00") {
+		t.Fatalf("base args = %#v, want %#v", baseArgs, wantBase)
+	}
+	if len(env) != 1 || env[0] != "HTTPS_PROXY=http://127.0.0.1:7890" {
+		t.Fatalf("env = %#v", env)
+	}
+
+	args := claudeModelProbeArgs(baseArgs)
+	for _, want := range []string{"-p", "--verbose", "--output-format", "stream-json", "--include-partial-messages", "--no-session-persistence", claudeModelDiscoveryPrompt} {
+		if !contains(args, want) {
+			t.Fatalf("missing arg %q in %#v", want, args)
+		}
+	}
 }
 
 type testWSFrame struct {
@@ -321,6 +387,24 @@ func assertContentEventOrder(t *testing.T, events []platform.EventData, runID st
 			t.Fatalf("events out of order: %v at positions %v, types %#v", expected, positions, eventTypes(events))
 		}
 	}
+}
+
+func assertContentDeltaAfter(t *testing.T, events []platform.EventData, after string) {
+	t.Helper()
+	start := eventPosition(events, after)
+	if start < 0 {
+		t.Fatalf("missing anchor event %s in %#v", after, eventTypes(events))
+	}
+	for idx := start + 1; idx < len(events); idx++ {
+		event := events[idx]
+		if event.Type != "content.delta" {
+			continue
+		}
+		if delta, _ := event.Payload["delta"].(string); strings.TrimSpace(delta) != "" {
+			return
+		}
+	}
+	t.Fatalf("missing content.delta after %s in %#v", after, eventTypes(events))
 }
 
 func eventPosition(events []platform.EventData, want string) int {
