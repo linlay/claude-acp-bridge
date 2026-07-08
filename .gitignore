@@ -6,7 +6,7 @@ config.yaml
 !.env.example
 
 # Build outputs
-/proxy-acp
+/claude-acp-bridge
 /claude-cli-acp
 bin/
 dist/

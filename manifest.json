@@ -1,0 +1,79 @@
+{
+  "pluginApiVersion": 1,
+  "id": "claude-acp-bridge",
+  "name": "Claude ACP Bridge",
+  "version": "v0.1.0",
+  "description": "Local ACP bridge service that lets Zenmind Desktop control the user's local Claude Code CLI runtime.",
+  "platform": {
+    "os": "darwin",
+    "arch": "arm64"
+  },
+  "service": {
+    "web": {
+      "healthPath": "/healthz",
+      "portEnvKey": "CLAUDE_ACP_BRIDGE_PORT",
+      "defaultPort": 17070
+    },
+    "ui": "none"
+  },
+  "api": {
+    "enabled": true
+  },
+  "backend": {
+    "entry": "backend/claude-acp-bridge"
+  },
+  "lifecycle": {
+    "start": [
+      "start.sh",
+      "--daemon"
+    ],
+    "stop": "stop.sh",
+    "deploy": "deploy.sh"
+  },
+  "configFiles": [
+    {
+      "key": "env",
+      "label": ".env",
+      "relativePath": ".env",
+      "templateRelativePath": ".env.example",
+      "required": true
+    }
+  ],
+  "runtime": {
+    "pidRelativePath": "run/claude-acp-bridge.pid",
+    "logRelativePath": "run/claude-acp-bridge.log",
+    "requiredPaths": [
+      "backend/claude-acp-bridge",
+      "start.sh",
+      "stop.sh",
+      "deploy.sh",
+      "scripts/program-common.sh",
+      ".env.example",
+      "manifest.json"
+    ]
+  },
+  "hooks": {
+    "subscribe": [
+      "desktop.ready",
+      "desktop.beforeQuit",
+      "plugin.configChanged",
+      "service.statusChanged:agent-platform",
+      "agentPlatform.ready"
+    ]
+  },
+  "bridge": {
+    "requests": [
+      "service.getStatus",
+      "agentPlatform.upsertAcpBridge",
+      "agentPlatform.removeAcpBridge"
+    ]
+  },
+  "desktop": {
+    "displayOrder": 9,
+    "autoStart": "optional",
+    "bundleTopLevelDir": "claude-acp-bridge",
+    "systemRequirements": [
+      "claude"
+    ]
+  }
+}

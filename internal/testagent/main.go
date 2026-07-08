@@ -13,7 +13,7 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 
-	"proxy-acp/internal/platform"
+	"claude-acp-bridge/internal/platform"
 )
 
 type agent struct {

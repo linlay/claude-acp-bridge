@@ -12,8 +12,8 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 
-	"proxy-acp/internal/config"
-	"proxy-acp/internal/platform"
+	"claude-acp-bridge/internal/config"
+	"claude-acp-bridge/internal/platform"
 )
 
 type recordingSink struct {

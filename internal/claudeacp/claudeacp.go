@@ -19,8 +19,8 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 
-	"proxy-acp/internal/claudecli"
-	"proxy-acp/internal/platform"
+	"claude-acp-bridge/internal/claudecli"
+	"claude-acp-bridge/internal/platform"
 )
 
 var errClaudeCLI = errors.New("claude cli returned an error")

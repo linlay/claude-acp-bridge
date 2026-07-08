@@ -12,12 +12,12 @@ import (
 
 const (
 	defaultAddr          = "127.0.0.1"
-	defaultPort          = "17071"
+	defaultPort          = "17070"
 	defaultClaudeCLI     = "claude"
 	defaultIdleTimeoutMs = int64(30 * time.Minute / time.Millisecond)
 
 	DefaultClaudeBackendKey = "claude-code"
-	SelfBackendCommand      = "__proxy-acp-self__"
+	SelfBackendCommand      = "__claude-acp-bridge-self__"
 	ClaudeBackendModeArg    = "__claude-cli-acp"
 )
 
@@ -50,7 +50,7 @@ type FileSystemCapabilities struct {
 func Load(path string) (Config, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
-		path = strings.TrimSpace(os.Getenv("PROXY_ACP_ENV"))
+		path = firstEnv("CLAUDE_ACP_BRIDGE_ENV", "PROXY_ACP_ENV")
 	}
 	if path == "" {
 		if _, err := os.Stat(".env"); err == nil {
@@ -67,21 +67,29 @@ func Load(path string) (Config, error) {
 		for key, value := range fileValues {
 			values[key] = value
 		}
+		applyLegacyFallbacks(values)
 	}
-	for _, key := range []string{
-		"PROXY_ACP_PORT",
-		"PROXY_ACP_ADDR",
-		"PROXY_ACP_AUTH_TOKEN",
-		"CLAUDE_CODE_CLI",
-		"CLAUDE_CODE_ARGS",
-		"PROXY_ACP_IDLE_TIMEOUT_MS",
-		"http_proxy",
-		"HTTP_PROXY",
-		"https_proxy",
-		"HTTPS_PROXY",
+	for _, item := range []struct {
+		key    string
+		target string
+	}{
+		{"PROXY_ACP_PORT", "CLAUDE_ACP_BRIDGE_PORT"},
+		{"PROXY_ACP_ADDR", "CLAUDE_ACP_BRIDGE_ADDR"},
+		{"PROXY_ACP_AUTH_TOKEN", "CLAUDE_ACP_BRIDGE_AUTH_TOKEN"},
+		{"PROXY_ACP_IDLE_TIMEOUT_MS", "CLAUDE_ACP_BRIDGE_IDLE_TIMEOUT_MS"},
+		{"CLAUDE_ACP_BRIDGE_PORT", "CLAUDE_ACP_BRIDGE_PORT"},
+		{"CLAUDE_ACP_BRIDGE_ADDR", "CLAUDE_ACP_BRIDGE_ADDR"},
+		{"CLAUDE_ACP_BRIDGE_AUTH_TOKEN", "CLAUDE_ACP_BRIDGE_AUTH_TOKEN"},
+		{"CLAUDE_ACP_BRIDGE_IDLE_TIMEOUT_MS", "CLAUDE_ACP_BRIDGE_IDLE_TIMEOUT_MS"},
+		{"CLAUDE_CODE_CLI", "CLAUDE_CODE_CLI"},
+		{"CLAUDE_CODE_ARGS", "CLAUDE_CODE_ARGS"},
+		{"http_proxy", "http_proxy"},
+		{"HTTP_PROXY", "HTTP_PROXY"},
+		{"https_proxy", "https_proxy"},
+		{"HTTPS_PROXY", "HTTPS_PROXY"},
 	} {
-		if value, ok := os.LookupEnv(key); ok {
-			values[key] = value
+		if value, ok := os.LookupEnv(item.key); ok {
+			values[item.target] = value
 		}
 	}
 
@@ -95,12 +103,37 @@ func Load(path string) (Config, error) {
 	return cfg, nil
 }
 
+func applyLegacyFallbacks(values map[string]string) {
+	for legacy, primary := range map[string]string{
+		"PROXY_ACP_PORT":            "CLAUDE_ACP_BRIDGE_PORT",
+		"PROXY_ACP_ADDR":            "CLAUDE_ACP_BRIDGE_ADDR",
+		"PROXY_ACP_AUTH_TOKEN":      "CLAUDE_ACP_BRIDGE_AUTH_TOKEN",
+		"PROXY_ACP_IDLE_TIMEOUT_MS": "CLAUDE_ACP_BRIDGE_IDLE_TIMEOUT_MS",
+	} {
+		if _, ok := values[primary]; ok {
+			continue
+		}
+		if value, ok := values[legacy]; ok {
+			values[primary] = value
+		}
+	}
+}
+
+func firstEnv(keys ...string) string {
+	for _, key := range keys {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 func fromEnv(values map[string]string) (Config, error) {
-	addr := strings.TrimSpace(envOrDefault(values, "PROXY_ACP_ADDR", defaultAddr))
+	addr := strings.TrimSpace(envOrDefault(values, "CLAUDE_ACP_BRIDGE_ADDR", defaultAddr))
 	if addr == "" {
 		addr = defaultAddr
 	}
-	port := strings.TrimSpace(envOrDefault(values, "PROXY_ACP_PORT", defaultPort))
+	port := strings.TrimSpace(envOrDefault(values, "CLAUDE_ACP_BRIDGE_PORT", defaultPort))
 	if err := validatePort(port); err != nil {
 		return Config{}, err
 	}
@@ -117,17 +150,17 @@ func fromEnv(values map[string]string) (Config, error) {
 		backendArgs = append(backendArgs, "-arg", arg)
 	}
 	idleTimeoutMs := defaultIdleTimeoutMs
-	if raw := strings.TrimSpace(values["PROXY_ACP_IDLE_TIMEOUT_MS"]); raw != "" {
+	if raw := strings.TrimSpace(values["CLAUDE_ACP_BRIDGE_IDLE_TIMEOUT_MS"]); raw != "" {
 		parsed, err := strconv.ParseInt(raw, 10, 64)
 		if err != nil || parsed <= 0 {
-			return Config{}, fmt.Errorf("PROXY_ACP_IDLE_TIMEOUT_MS must be a positive integer")
+			return Config{}, fmt.Errorf("CLAUDE_ACP_BRIDGE_IDLE_TIMEOUT_MS must be a positive integer")
 		}
 		idleTimeoutMs = parsed
 	}
 
 	cfg := Config{
 		ListenAddr:     net.JoinHostPort(addr, port),
-		AuthToken:      strings.TrimSpace(values["PROXY_ACP_AUTH_TOKEN"]),
+		AuthToken:      strings.TrimSpace(values["CLAUDE_ACP_BRIDGE_AUTH_TOKEN"]),
 		DefaultBackend: DefaultClaudeBackendKey,
 		Backends: []BackendConfig{{
 			Key:           DefaultClaudeBackendKey,
@@ -286,7 +319,7 @@ func envOrDefault(values map[string]string, key string, fallback string) string 
 func validatePort(port string) error {
 	parsed, err := strconv.Atoi(port)
 	if err != nil || parsed < 1 || parsed > 65535 {
-		return fmt.Errorf("PROXY_ACP_PORT must be an integer from 1 to 65535")
+		return fmt.Errorf("CLAUDE_ACP_BRIDGE_PORT must be an integer from 1 to 65535")
 	}
 	return nil
 }

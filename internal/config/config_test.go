@@ -13,7 +13,7 @@ func TestLoadDefaultsToLocalClaudeBackend(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if cfg.ListenAddr != "127.0.0.1:17071" {
+	if cfg.ListenAddr != "127.0.0.1:17070" {
 		t.Fatalf("listen addr = %q", cfg.ListenAddr)
 	}
 	if cfg.AuthToken != "" {
@@ -36,12 +36,14 @@ func TestLoadDefaultsToLocalClaudeBackend(t *testing.T) {
 
 func TestLoadAppliesEnvOverrides(t *testing.T) {
 	withCleanEnv(t)
-	t.Setenv("PROXY_ACP_PORT", "4567")
-	t.Setenv("PROXY_ACP_ADDR", "0.0.0.0")
-	t.Setenv("PROXY_ACP_AUTH_TOKEN", "secret")
+	t.Setenv("CLAUDE_ACP_BRIDGE_PORT", "4567")
+	t.Setenv("CLAUDE_ACP_BRIDGE_ADDR", "0.0.0.0")
+	t.Setenv("CLAUDE_ACP_BRIDGE_AUTH_TOKEN", "secret")
+	t.Setenv("PROXY_ACP_PORT", "9999")
+	t.Setenv("PROXY_ACP_AUTH_TOKEN", "old_secret")
 	t.Setenv("CLAUDE_CODE_CLI", "/opt/bin/claude")
 	t.Setenv("CLAUDE_CODE_ARGS", `--permission-mode dontAsk --label "hello world"`)
-	t.Setenv("PROXY_ACP_IDLE_TIMEOUT_MS", "42")
+	t.Setenv("CLAUDE_ACP_BRIDGE_IDLE_TIMEOUT_MS", "42")
 	t.Setenv("http_proxy", "http://127.0.0.1:8001")
 	t.Setenv("HTTP_PROXY", "http://127.0.0.1:8001")
 	t.Setenv("https_proxy", "http://127.0.0.1:8001")
@@ -81,23 +83,46 @@ func TestLoadAppliesEnvOverrides(t *testing.T) {
 	}
 }
 
+func TestLoadAppliesLegacyEnvFallbacks(t *testing.T) {
+	withCleanEnv(t)
+	t.Setenv("PROXY_ACP_PORT", "4568")
+	t.Setenv("PROXY_ACP_ADDR", "0.0.0.0")
+	t.Setenv("PROXY_ACP_AUTH_TOKEN", "legacy_secret")
+	t.Setenv("PROXY_ACP_IDLE_TIMEOUT_MS", "43")
+
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.ListenAddr != "0.0.0.0:4568" {
+		t.Fatalf("listen addr = %q", cfg.ListenAddr)
+	}
+	if cfg.AuthToken != "legacy_secret" {
+		t.Fatalf("auth token = %q", cfg.AuthToken)
+	}
+	if cfg.Backends[0].IdleTimeoutMs != 43 {
+		t.Fatalf("idle timeout = %d", cfg.Backends[0].IdleTimeoutMs)
+	}
+}
+
 func TestLoadDotenvAndProcessEnvPrecedence(t *testing.T) {
 	withCleanEnv(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".env")
 	if err := os.WriteFile(path, []byte(strings.Join([]string{
-		"PROXY_ACP_PORT=5555",
-		"PROXY_ACP_ADDR=0.0.0.0",
-		"PROXY_ACP_AUTH_TOKEN=from_file",
+		"CLAUDE_ACP_BRIDGE_PORT=5555",
+		"CLAUDE_ACP_BRIDGE_ADDR=0.0.0.0",
+		"CLAUDE_ACP_BRIDGE_AUTH_TOKEN=from_file",
+		"PROXY_ACP_AUTH_TOKEN=legacy_file",
 		"CLAUDE_CODE_CLI=/file/claude",
 		"CLAUDE_CODE_ARGS=\"--permission-mode dontAsk\"",
-		"PROXY_ACP_IDLE_TIMEOUT_MS=99",
+		"CLAUDE_ACP_BRIDGE_IDLE_TIMEOUT_MS=99",
 		"HTTP_PROXY=http://127.0.0.1:8001",
 		"",
 	}, "\n")), 0o600); err != nil {
 		t.Fatalf("write dotenv: %v", err)
 	}
-	t.Setenv("PROXY_ACP_AUTH_TOKEN", "from_env")
+	t.Setenv("CLAUDE_ACP_BRIDGE_AUTH_TOKEN", "from_env")
 	t.Setenv("CLAUDE_CODE_CLI", "/env/claude")
 	t.Setenv("CLAUDE_CODE_ARGS", "--permission-mode plan")
 
@@ -139,18 +164,18 @@ func TestLoadRejectsInvalidClaudeCodeArgs(t *testing.T) {
 
 func TestLoadRejectsInvalidPort(t *testing.T) {
 	withCleanEnv(t)
-	t.Setenv("PROXY_ACP_PORT", "70000")
+	t.Setenv("CLAUDE_ACP_BRIDGE_PORT", "70000")
 	_, err := Load("")
-	if err == nil || !strings.Contains(err.Error(), "PROXY_ACP_PORT") {
+	if err == nil || !strings.Contains(err.Error(), "CLAUDE_ACP_BRIDGE_PORT") {
 		t.Fatalf("error = %v, want port error", err)
 	}
 }
 
 func TestLoadRejectsInvalidIdleTimeout(t *testing.T) {
 	withCleanEnv(t)
-	t.Setenv("PROXY_ACP_IDLE_TIMEOUT_MS", "nope")
+	t.Setenv("CLAUDE_ACP_BRIDGE_IDLE_TIMEOUT_MS", "nope")
 	_, err := Load("")
-	if err == nil || !strings.Contains(err.Error(), "PROXY_ACP_IDLE_TIMEOUT_MS") {
+	if err == nil || !strings.Contains(err.Error(), "CLAUDE_ACP_BRIDGE_IDLE_TIMEOUT_MS") {
 		t.Fatalf("error = %v, want idle timeout error", err)
 	}
 }
@@ -178,6 +203,11 @@ func TestNormalizeNonClaudeDefaultsAreRestricted(t *testing.T) {
 func withCleanEnv(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{
+		"CLAUDE_ACP_BRIDGE_ENV",
+		"CLAUDE_ACP_BRIDGE_PORT",
+		"CLAUDE_ACP_BRIDGE_ADDR",
+		"CLAUDE_ACP_BRIDGE_AUTH_TOKEN",
+		"CLAUDE_ACP_BRIDGE_IDLE_TIMEOUT_MS",
 		"PROXY_ACP_ENV",
 		"PROXY_ACP_PORT",
 		"PROXY_ACP_ADDR",

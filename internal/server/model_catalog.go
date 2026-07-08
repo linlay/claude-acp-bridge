@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"proxy-acp/internal/platform"
+	"claude-acp-bridge/internal/platform"
 )
 
 var claudeReasoningEfforts = []string{"LOW", "MEDIUM", "HIGH", "XHIGH", "MAX"}

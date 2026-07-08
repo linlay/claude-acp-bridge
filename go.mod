@@ -1,4 +1,4 @@
-module proxy-acp
+module claude-acp-bridge
 
 go 1.26
 

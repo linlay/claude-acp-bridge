@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"proxy-acp/internal/claudecli"
-	"proxy-acp/internal/config"
-	"proxy-acp/internal/platform"
+	"claude-acp-bridge/internal/claudecli"
+	"claude-acp-bridge/internal/config"
+	"claude-acp-bridge/internal/platform"
 )
 
 const (
