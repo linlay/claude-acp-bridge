@@ -454,7 +454,7 @@ func TestManagerSubmitResolvesQuestionAwaiting(t *testing.T) {
 	if awaiting.Type == "" {
 		t.Fatalf("expected question awaiting.ask, got %#v", eventTypes(sink.snapshot()))
 	}
-	if got := awaiting.Payload["viewportKey"]; got != "question" {
+	if got := awaiting.Payload["view"].(map[string]any)["key"]; got != "question" {
 		t.Fatalf("viewportKey = %#v", got)
 	}
 	questions, ok := awaiting.Payload["questions"].([]map[string]any)

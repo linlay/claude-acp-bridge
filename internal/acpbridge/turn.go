@@ -771,23 +771,21 @@ func (t *turn) requestPermission(ctx context.Context, params acp.RequestPermissi
 
 	if mode == "question" {
 		t.emit("awaiting.ask", map[string]any{
-			"awaitingId":   awaitingID,
-			"mode":         "question",
-			"viewportType": "builtin",
-			"viewportKey":  "question",
-			"timeout":      int64(120000),
-			"runId":        t.req.RunID,
-			"questions":    questions,
+			"awaitingId": awaitingID,
+			"mode":       "question",
+			"view":       map[string]any{"source": "builtin", "key": "question", "renderer": "native"},
+			"timeout":    int64(120000),
+			"runId":      t.req.RunID,
+			"questions":  questions,
 		})
 	} else {
 		t.emit("awaiting.ask", map[string]any{
-			"awaitingId":   awaitingID,
-			"mode":         "approval",
-			"viewportType": "builtin",
-			"viewportKey":  "approval",
-			"timeout":      int64(120000),
-			"runId":        t.req.RunID,
-			"approvals":    permissionApprovals(params.ToolCall, params.Options),
+			"awaitingId": awaitingID,
+			"mode":       "approval",
+			"view":       map[string]any{"source": "builtin", "key": "approval", "renderer": "native"},
+			"timeout":    int64(120000),
+			"runId":      t.req.RunID,
+			"approvals":  permissionApprovals(params.ToolCall, params.Options),
 		})
 	}
 
@@ -844,12 +842,11 @@ func (t *turn) requestPlanApproval(ctx context.Context, planningID string, planT
 
 	t.closeOpenTextStreams()
 	t.emit("awaiting.ask", map[string]any{
-		"awaitingId":   awaitingID,
-		"mode":         "plan",
-		"viewportType": "builtin",
-		"viewportKey":  "plan",
-		"timeout":      int64(0),
-		"runId":        t.req.RunID,
+		"awaitingId": awaitingID,
+		"mode":       "plan",
+		"view":       map[string]any{"source": "builtin", "key": "planning", "renderer": "native"},
+		"timeout":    int64(0),
+		"runId":      t.req.RunID,
 		"plan": map[string]any{
 			"id":         awaitingID,
 			"planningId": planningID,

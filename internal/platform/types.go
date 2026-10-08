@@ -302,7 +302,7 @@ func orderedPayloadKeys(eventType string) []string {
 	case "tool.result":
 		return []string{"toolId", "result", "hitl", "error", "exitCode"}
 	case "awaiting.ask":
-		return []string{"awaitingId", "mode", "viewportType", "viewportKey", "timeout", "runId", "questions", "approvals", "forms", "plan"}
+		return []string{"awaitingId", "mode", "view", "timeout", "runId", "questions", "approvals", "forms", "plan"}
 	case "request.submit":
 		return []string{"requestId", "chatId", "runId", "awaitingId", "params"}
 	case "awaiting.answer":
