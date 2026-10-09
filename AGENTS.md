@@ -156,3 +156,7 @@ make clean
 - Backend processes inherit the service environment.
 - Claude defaults to file read, file write, and terminal capabilities enabled.
 - WebSocket origin checks currently allow all origins.
+
+## macOS Desktop plugin release
+
+`make release-plugin` builds a Darwin binary and a single-root ZIP with `pluginApiVersion: 1`. `ARCH=amd64` selects Intel Macs; default is arm64. Use only canonical `agentPlatform.upsertAcpBridge`, `bridgeId`, `acp-bridges`, and `runtimeConfig.acpBridgeId`. Windows plugin delivery is deferred. Never package real `.env` or runtime state.

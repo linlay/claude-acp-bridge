@@ -2,7 +2,7 @@
   "pluginApiVersion": 1,
   "id": "claude-acp-bridge",
   "name": "Claude ACP Bridge",
-  "version": "v0.1.0",
+  "version": "v0.1.1",
   "description": "Local ACP bridge service that lets Zenmind Desktop control the user's local Claude Code CLI runtime.",
   "platform": {
     "os": "darwin",

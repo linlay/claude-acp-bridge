@@ -99,7 +99,7 @@ func (m *Manager) Submit(req platform.SubmitRequest) (platform.SubmitResponse, b
 	}
 
 	if pending.mode == "plan" {
-		decision := planDecisionFromSubmit(req.Params)
+		decision := planDecisionFromSubmit(req.Param)
 		select {
 		case pending.planReply <- decision:
 			return platform.SubmitResponse{

@@ -2,11 +2,14 @@ package desktopbridge
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
+	"log"
 	"net"
 	"os"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -66,6 +69,7 @@ func TestClientSendsHelloAndUpsertOnAgentPlatformReady(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	client := New(Config{PluginID: "claude-acp-bridge", Version: bridgeVersion, Path: socketPath, Token: "token"}, "claude", "http://127.0.0.1:17070", 300000, nil)
+	client.SetAuthToken("test-bridge-auth")
 	go client.Run(ctx)
 
 	select {
@@ -74,6 +78,9 @@ func TestClientSendsHelloAndUpsertOnAgentPlatformReady(t *testing.T) {
 			t.Fatalf("method = %v", request["method"])
 		}
 		params := request["params"].(map[string]any)
+		if params["authToken"] != "test-bridge-auth" {
+			t.Fatal("bridge auth token was not registered")
+		}
 		if params["bridgeId"] != "claude" || params["baseUrl"] != "http://127.0.0.1:17070" {
 			t.Fatalf("unexpected params: %#v", params)
 		}
@@ -172,5 +179,50 @@ func TestClientReconnectsAfterDisconnect(t *testing.T) {
 	case <-secondHello:
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for reconnect hello")
+	}
+}
+
+func TestRegistrationRejectionIsLoggedWithoutPrivateHostError(t *testing.T) {
+	var out bytes.Buffer
+	client := New(Config{}, "test", "http://127.0.0.1:17071", 300000, log.New(&out, "", 0))
+	client.handleEnvelope(nil, map[string]any{"type": "response", "id": "register-1", "ok": false, "error": "private-token"})
+	if !strings.Contains(out.String(), "registration rejected") || strings.Contains(out.String(), "private-token") {
+		t.Fatalf("unexpected log: %s", out.String())
+	}
+}
+
+func TestConnectionCancellationClosesReadLoop(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("macOS plugin socket")
+	}
+	dir, err := os.MkdirTemp("/tmp", "acp-cancel-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	listener, err := net.Listen("unix", dir+"/bridge.sock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	client := New(Config{Path: dir + "/bridge.sock"}, "test", "http://127.0.0.1:17071", 300000, nil)
+	done := make(chan error, 1)
+	go func() { done <- client.runConnection(ctx) }()
+	conn, err := listener.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	scanner := bufio.NewScanner(conn)
+	if !scanner.Scan() {
+		t.Fatal("missing hello")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("connection read did not stop on cancellation")
 	}
 }

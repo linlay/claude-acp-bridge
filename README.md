@@ -112,7 +112,7 @@ Build the Desktop plugin archive:
 make release-plugin
 ```
 
-This writes `dist/release/claude-acp-bridge-v0.1.0-darwin-arm64.tar.gz`.
+This writes `dist/release/claude-acp-bridge-v0.1.1-darwin-arm64.zip`.
 
 Run with an explicit dotenv path:
 
@@ -151,3 +151,11 @@ When terminal or file-write capabilities are enabled, Claude Code can execute lo
 - `POST /api/steer` queues a follow-up user prompt on the active ACP run.
 - `POST /api/interrupt` sends ACP `session/cancel`.
 - `GET /ws` accepts platform frames for query, submit, steer, access-level updates, and interrupt.
+
+### macOS plugin release contract
+
+`make release-plugin` creates a single-root ZIP for Desktop import, with explicit Darwin/arm64 compilation. Use `make release-plugin ARCH=amd64` for Intel Macs. The ZIP manifest records the selected architecture and version; only the binary, lifecycle scripts, manifest and example config are included. Local `.env`, credentials and runtime files are excluded. Windows plugin packaging is not supported yet.
+
+Desktop uses `agentPlatform.upsertAcpBridge` with `bridgeId`, `baseUrl` and `timeoutMs`; Platform uses `acp-bridges` and agents use `runtimeConfig.acpBridgeId`. Old `acp-proxies` / `acpProxyId` are not a fallback. Desktop plugin registration uses a Unix socket; inference still uses loopback HTTP/WebSocket, with internal ACP over stdio. Host rejection is reported in the service log.
+
+Registration sends the bridge auth token over the authenticated local Desktop socket. Configuration changes require restarting Agent Platform; the bridge logs the restart requirement. Repeated unchanged registration does not rewrite the Platform configuration.

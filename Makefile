@@ -2,10 +2,10 @@ APP_NAME := claude-acp-bridge
 BIN_DIR := bin
 DIST_DIR := dist
 RELEASE_DIR := $(DIST_DIR)/release
-VERSION := v0.1.0
+VERSION ?= v0.1.1
 OS := darwin
-ARCH := arm64
-ASSET_NAME := $(APP_NAME)-$(VERSION)-$(OS)-$(ARCH).tar.gz
+ARCH ?= arm64
+ASSET_NAME := $(APP_NAME)-$(VERSION)-$(OS)-$(ARCH).zip
 ENV ?= .env
 
 .PHONY: build build-windows-amd64 release-plugin release-program run test fmt clean
@@ -18,22 +18,15 @@ build-windows-amd64:
 	mkdir -p $(DIST_DIR)/windows-amd64
 	GOOS=windows GOARCH=amd64 go build -o $(DIST_DIR)/windows-amd64/$(APP_NAME).exe ./cmd/claude-acp-bridge
 
-release-program: build
-	rm -rf $(DIST_DIR)/bundle
-	mkdir -p $(DIST_DIR)/bundle/$(APP_NAME)/backend \
-		$(DIST_DIR)/bundle/$(APP_NAME)/scripts \
-		$(RELEASE_DIR)
-	cp $(BIN_DIR)/$(APP_NAME) $(DIST_DIR)/bundle/$(APP_NAME)/backend/$(APP_NAME)
-	cp manifest.json .env.example start.sh stop.sh deploy.sh $(DIST_DIR)/bundle/$(APP_NAME)/
-	cp scripts/program-common.sh $(DIST_DIR)/bundle/$(APP_NAME)/scripts/program-common.sh
-	chmod +x $(DIST_DIR)/bundle/$(APP_NAME)/backend/$(APP_NAME) \
-		$(DIST_DIR)/bundle/$(APP_NAME)/start.sh \
-		$(DIST_DIR)/bundle/$(APP_NAME)/stop.sh \
-		$(DIST_DIR)/bundle/$(APP_NAME)/deploy.sh \
-		$(DIST_DIR)/bundle/$(APP_NAME)/scripts/program-common.sh
-	tar -czf $(RELEASE_DIR)/$(ASSET_NAME) -C $(DIST_DIR)/bundle $(APP_NAME)
+# Desktop imports a single-root ZIP; release builds explicitly target macOS.
+release-program: release-plugin
 
-release-plugin: release-program
+release-plugin:
+	@test "$(OS)" = darwin || (echo "Desktop plugin release currently supports macOS only"; exit 1)
+	@test "$(ARCH)" = arm64 -o "$(ARCH)" = amd64 || (echo "unsupported macOS architecture"; exit 1)
+	mkdir -p $(DIST_DIR)/bundle/$(APP_NAME)/backend $(RELEASE_DIR)
+	GOOS=darwin GOARCH=$(ARCH) go build -o $(DIST_DIR)/bundle/$(APP_NAME)/backend/$(APP_NAME) ./cmd/$(APP_NAME)
+	python3 scripts/package-plugin.py --version "$(VERSION)" --arch "$(ARCH)" --output "$(RELEASE_DIR)/$(ASSET_NAME)"
 
 run:
 	go run ./cmd/claude-acp-bridge -env $(ENV)

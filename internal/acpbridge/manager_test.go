@@ -337,7 +337,7 @@ func TestManagerPlanningModeRequestsPlanApproval(t *testing.T) {
 	resp, ok := m.Submit(platform.SubmitRequest{
 		RunID:      "run_plan",
 		AwaitingID: awaitingID,
-		Params:     []map[string]any{{"decision": "approve"}},
+		Param:      map[string]any{"decision": "approve"},
 	})
 	if !ok || !resp.Accepted {
 		t.Fatalf("submit response = %#v ok=%v", resp, ok)

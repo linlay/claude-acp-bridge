@@ -37,6 +37,7 @@ type Client struct {
 	config     Config
 	bridgeID   string
 	baseURL    string
+	authToken  string
 	timeoutMS  int
 	logger     Logger
 	beforeQuit chan struct{}
@@ -95,6 +96,9 @@ func BaseURLFromListenAddr(listenAddr string) string {
 	return "http://" + net.JoinHostPort(host, port)
 }
 
+// SetAuthToken configures the upstream credential before Run starts.
+func (c *Client) SetAuthToken(token string) { c.authToken = token }
+
 func (c *Client) BeforeQuit() <-chan struct{} {
 	return c.beforeQuit
 }
@@ -128,6 +132,8 @@ func (c *Client) runConnection(ctx context.Context) error {
 		return err
 	}
 	defer conn.Close()
+	stopCancel := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stopCancel()
 
 	if err := c.writeEnvelope(conn, map[string]any{
 		"type":            "hello",
@@ -154,6 +160,16 @@ func (c *Client) runConnection(ctx context.Context) error {
 }
 
 func (c *Client) handleEnvelope(conn net.Conn, envelope map[string]any) {
+	if envelope["type"] == "response" {
+		if ok, _ := envelope["ok"].(bool); !ok {
+			// Host error text may contain private config; log only the request id.
+			c.logger.Printf("[desktop-bridge] ACP registration rejected (request %v); check Desktop/Platform compatibility and service readiness", envelope["id"])
+		}
+		if result, ok := envelope["result"].(map[string]any); ok && result["restartRequired"] == true {
+			c.logger.Printf("[desktop-bridge] ACP registration saved; restart agent-platform to load the updated bridge configuration")
+		}
+		return
+	}
 	if envelope["type"] != "event" {
 		return
 	}
@@ -183,6 +199,7 @@ func (c *Client) requestUpsert(conn net.Conn) error {
 			"bridgeId":  c.bridgeID,
 			"baseUrl":   c.baseURL,
 			"timeoutMs": c.timeoutMS,
+			"authToken": c.authToken,
 		},
 	})
 }

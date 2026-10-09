@@ -58,7 +58,7 @@ type pendingPermission struct {
 type planDecision struct {
 	Decision string
 	Reason   string
-	Params   []map[string]any
+	Param    map[string]any
 }
 
 func newTurn(req platform.QueryRequest, sink EventSink, mgr *Manager) *turn {
@@ -857,10 +857,10 @@ func (t *turn) requestPlanApproval(ctx context.Context, planningID string, planT
 
 	select {
 	case decision := <-pending.planReply:
-		if decision.Params == nil {
-			decision.Params = []map[string]any{}
+		if decision.Param == nil {
+			decision.Param = map[string]any{"decision": "dismiss"}
 		}
-		t.emit("request.submit", map[string]any{"runId": t.req.RunID, "chatId": t.req.ChatID, "awaitingId": awaitingID, "params": decision.Params})
+		t.emit("request.submit", map[string]any{"runId": t.req.RunID, "chatId": t.req.ChatID, "awaitingId": awaitingID, "param": decision.Param})
 		if decision.Decision == "approve" || decision.Decision == "reject" {
 			plan := map[string]any{
 				"id":         awaitingID,
@@ -1152,18 +1152,17 @@ func questionOutcomeFromSubmit(params []map[string]any, questions []map[string]a
 	}}
 }
 
-func planDecisionFromSubmit(params []map[string]any) planDecision {
-	decision := planDecision{Decision: "reject", Params: cloneMapSlice(params)}
-	if len(params) == 0 {
+// planDecisionFromSubmit reads the single plan answer. Anything other than an
+// explicit approve, including dismiss, leaves the plan unapproved.
+func planDecisionFromSubmit(param map[string]any) planDecision {
+	decision := planDecision{Decision: "reject", Param: cloneAnyMap(param)}
+	if len(param) == 0 {
 		return decision
 	}
-	rawDecision := strings.ToLower(strings.TrimSpace(fmt.Sprint(params[0]["decision"])))
-	if rawDecision == "approve" {
+	if strings.ToLower(strings.TrimSpace(fmt.Sprint(param["decision"]))) == "approve" {
 		decision.Decision = "approve"
-	} else {
-		decision.Decision = "reject"
 	}
-	if reason, ok := params[0]["reason"]; ok {
+	if reason, ok := param["reason"]; ok {
 		decision.Reason = strings.TrimSpace(fmt.Sprint(reason))
 	}
 	return decision

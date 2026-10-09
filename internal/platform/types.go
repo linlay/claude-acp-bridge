@@ -75,9 +75,12 @@ type Reference struct {
 }
 
 type SubmitRequest struct {
-	RunID      string           `json:"runId"`
-	AwaitingID string           `json:"awaitingId"`
-	Params     []map[string]any `json:"params"`
+	RunID      string `json:"runId"`
+	AwaitingID string `json:"awaitingId"`
+	// Param is the single answer of a plan awaiting; Params is the item list
+	// of question and approval awaitings.
+	Param  map[string]any   `json:"param,omitempty"`
+	Params []map[string]any `json:"params,omitempty"`
 }
 
 type SteerRequest struct {
@@ -304,7 +307,7 @@ func orderedPayloadKeys(eventType string) []string {
 	case "awaiting.ask":
 		return []string{"awaitingId", "mode", "view", "timeout", "runId", "questions", "approvals", "forms", "plan"}
 	case "request.submit":
-		return []string{"requestId", "chatId", "runId", "awaitingId", "params"}
+		return []string{"requestId", "chatId", "runId", "awaitingId", "param", "params"}
 	case "awaiting.answer":
 		return []string{"awaitingId", "mode", "status", "answers", "approvals", "forms", "plan", "error"}
 	case "request.steer":
